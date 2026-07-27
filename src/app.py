@@ -16,8 +16,19 @@ import log_capture
 log_capture.init(os.path.join(data_path, 'app.log'))
 library_db.init_db()
 
+from api import bp as api_bp
+
+try:
+    with open(os.path.join(os.path.dirname(__file__), 'ytdlp_searches.json'), 'r') as _f:
+        YTDLP_SEARCH_PREFIXES = json.load(_f).get('prefixes') or []
+    print(f'Loaded {len(YTDLP_SEARCH_PREFIXES)} yt-dlp search prefixes')
+except Exception as _e:
+    print(f'ytdlp_searches.json not loaded: {_e}')
+    YTDLP_SEARCH_PREFIXES = []
+
 
 app = Flask(__name__)
+app.register_blueprint(api_bp)
 wsgi = WSGIMiddleware(app)
 
 def signal_handler(signum, frame):
@@ -49,6 +60,7 @@ def _render_home():
         entries=entries, grouped=grouped, total=len(entries),
         all_tags=all_tags, all_categories=all_categories, all_sites=all_sites,
         hidden_sites=hidden_sites, show_hidden=show_hidden,
+        search_prefixes=YTDLP_SEARCH_PREFIXES,
         ydl_version=ydl_version, app_version=app_version,
         js_runtime_version=js_runtime_version, ffmpeg_version=ffmpeg_version,
         app_title=app_title, theme_color=theme_color, amoled_bg=amoled_bg)
@@ -118,6 +130,48 @@ def library_site_unhide():
     if not name: return jsonify({"error": "name parameter is required"}), 400
     library_db.unhide_site(name)
     return jsonify({"ok": True}), 200
+
+
+@app.route('/ytsearch')
+def ytsearch_route():
+    q = request.args.get('q', '').strip()
+    if not q: return jsonify({"error": "q parameter required"}), 400
+    if YTDLP_SEARCH_PREFIXES:
+        q_lower = q.lower()
+        if not any(q_lower.startswith(p) for p in YTDLP_SEARCH_PREFIXES):
+            return jsonify({
+                "error": "Unknown search prefix. Query must start with one of: " + ", ".join(f"{p}:" for p in YTDLP_SEARCH_PREFIXES),
+                "known_prefixes": YTDLP_SEARCH_PREFIXES,
+            }), 400
+    try:
+        entries = flat_search(q)
+    except Exception as e:
+        return pprint_exc(e)
+    results = []
+    for e in entries:
+        url = e.get('webpage_url') or e.get('url') or e.get('original_url') or ''
+        if not url: continue
+        try:
+            url = normalize_url(url)
+        except Exception:
+            pass
+        thumb = e.get('thumbnail')
+        if not thumb:
+            thumbs = e.get('thumbnails') or []
+            if thumbs and isinstance(thumbs, list):
+                thumb = thumbs[-1].get('url') if isinstance(thumbs[-1], dict) else None
+        if not thumb and (e.get('ie_key') == 'Youtube' or 'youtube' in (e.get('extractor') or '').lower()) and e.get('id'):
+            thumb = f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"
+        results.append({
+            'title': e.get('title') or url,
+            'url': url,
+            'uploader': e.get('uploader') or e.get('channel') or '',
+            'duration': int(e.get('duration') or 0),
+            'thumbnail': thumb or '',
+            'view_count': e.get('view_count'),
+            'id': e.get('id') or '',
+        })
+    return jsonify({'results': results, 'count': len(results)}), 200
 
 
 @app.route('/logs')
@@ -250,10 +304,30 @@ def iframe():
     return render_template('iframe.html', app_title=app_title, theme_color=theme_color, video_width=video_width, video_height=video_height)
 
 
+def _serve_sprite_tile(sprite_path):
+    from PIL import Image
+    with Image.open(sprite_path) as im:
+        w, h = im.size
+        cols = 10 if w >= 200 else 1
+        tile_w = w // cols
+        tile_h = min(int(tile_w * 9 / 16), h)
+        tile = im.crop((0, 0, tile_w, tile_h))
+        buf = BytesIO()
+        tile.save(buf, format='JPEG', quality=90)
+        buf.seek(0)
+        return Response(buf.read(), mimetype='image/jpeg')
+
+
 @app.route('/thumb')
 def serve_thumbnail():
     try:
         url = get_url(request)
+        if url:
+            data_dir = get_data_dir(url)
+            thumb_path = os.path.join(data_dir, 'thumb.jpg')
+            sprite_path = os.path.join(data_dir, 'sprite.jpg')
+            if not os.path.exists(thumb_path) and os.path.exists(sprite_path):
+                return _serve_sprite_tile(sprite_path)
         return host_file(url, 'thumb')
     except Exception as e:
         return pprint_exc(e)

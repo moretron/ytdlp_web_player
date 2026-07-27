@@ -286,7 +286,8 @@ def _row_from_meta(url, name, vid_dir, meta):
         meta.get('width'),
         meta.get('height'),
         meta.get('upload_date') or '',
-        1 if os.path.exists(os.path.join(vid_dir, 'thumb.jpg')) else 0,
+        1 if (os.path.exists(os.path.join(vid_dir, 'thumb.jpg'))
+              or os.path.exists(os.path.join(vid_dir, 'sprite.jpg'))) else 0,
         int(os.path.getmtime(os.path.join(vid_dir, 'meta.json'))),
     )
 

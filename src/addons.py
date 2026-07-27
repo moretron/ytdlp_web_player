@@ -1265,6 +1265,18 @@ def search(query, search_engine='auto'):
     return entries
 
 
+def flat_search(query):
+    """Run a yt-dlp search query with extract_flat for speed. Preserves clean URLs
+    so results map to the same library entries as direct URL visits."""
+    print(f'Flat search for {query}')
+    ydl_opts = {'quiet': True, 'skip_download': True, 'extract_flat': 'in_playlist', 'default_search': 'auto'}
+    ydl_opts.update(ydl_global_opts)
+    ydl_opts.pop('playlistend', None)
+    ydl_opts.pop('noplaylist', None)
+    info = YTDLP.get_info(query, ydl_opts)
+    return info.get('entries') or []
+
+
 def generate_chapters(meta: dict):
     chapters = []
     try:

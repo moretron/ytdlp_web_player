@@ -1055,6 +1055,33 @@ body.library-body
 }
 
 
+#search-results
+{
+    margin-top: 24px;
+    padding: 16px;
+    background-color: var(--theme-bg-light);
+    border-radius: 8px;
+    border: 1px solid #333;
+}
+
+.search-results-header
+{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+}
+
+.search-results-actions
+{
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+
 .home-header
 {
     display: flex;

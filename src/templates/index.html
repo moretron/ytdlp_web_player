@@ -37,12 +37,13 @@
                     </button>
                 </div>
                 <div class="home-url-bar" id="main-input">
-                    <input type="text" id="url" name="url" placeholder="Filter library or paste URL" autofocus autocomplete="off"/>
+                    <input type="text" id="url" name="url" placeholder="Filter library, paste URL, or ytsearch5:your query" autofocus autocomplete="off"/>
                     <button onclick="handlePlayButtonClick()" id="submit" title="Play URL">
                         <i class="fa-solid fa-play"></i>
                     </button>
                 </div>
                 <p id="no-matches" class="library-empty" style="display: none; margin-top: 24px;">No videos match that filter.</p>
+                <div id="search-results" style="display: none;"></div>
             </header>
 
             {% if all_sites or all_categories or all_tags %}
@@ -222,6 +223,14 @@
             });
 
             const urlRegex = /[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/gi;
+            const YTDLP_SEARCH_PREFIXES = {{ search_prefixes|tojson }};
+            const searchPrefixRegex = YTDLP_SEARCH_PREFIXES.length
+                ? new RegExp('^(' + YTDLP_SEARCH_PREFIXES.join('|') + ')[a-z0-9]*:', 'i')
+                : /^[a-z][a-z0-9]*search[a-z0-9]*:/i;
+
+            function isYtdlpSearch(text) {
+                return searchPrefixRegex.test((text || '').trim());
+            }
 
             function tryPlayUrl(text) {
                 let url = (text || '').trim();
@@ -240,12 +249,124 @@
             function handlePlayButtonClick() {
                 const text = urlInput.value.trim();
                 if (text) {
+                    if (isYtdlpSearch(text)) {
+                        runYtdlpSearch(text);
+                        return;
+                    }
                     tryPlayUrl(text);
                     return;
                 }
                 navigator.clipboard.readText().then(clipboardText => {
                     tryPlayUrl(clipboardText);
                 });
+            }
+
+            const searchResultsEl = document.getElementById('search-results');
+
+            function fmtDuration(sec) {
+                if (!sec) return '';
+                const h = Math.floor(sec / 3600);
+                const m = Math.floor((sec % 3600) / 60);
+                const s = sec % 60;
+                return h ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
+                         : `${m}:${String(s).padStart(2,'0')}`;
+            }
+
+            function fmtCount(n) {
+                if (n == null) return '';
+                if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B views';
+                if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M views';
+                if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K views';
+                return n + ' views';
+            }
+
+            async function runYtdlpSearch(query) {
+                searchResultsEl.style.display = '';
+                searchResultsEl.innerHTML = '<p class="library-empty" style="margin: 24px 0;">Searching&hellip;</p>';
+                try {
+                    const resp = await fetch('/ytsearch?q=' + encodeURIComponent(query));
+                    if (!resp.ok) throw new Error(await resp.text());
+                    const data = await resp.json();
+                    if (!data.results || data.results.length === 0) {
+                        searchResultsEl.innerHTML = '<p class="library-empty" style="margin: 24px 0;">No results.</p>';
+                        return;
+                    }
+                    if (data.results.length === 1) {
+                        window.location.href = '/watch?url=' + encodeURIComponent(data.results[0].url);
+                        return;
+                    }
+                    renderYtdlpResults(data.results, query);
+                } catch (e) {
+                    searchResultsEl.innerHTML = '<p class="library-empty" style="margin: 24px 0; color: #c66;">Search failed: ' + e.message + '</p>';
+                }
+            }
+
+            function renderYtdlpResults(results, query) {
+                const header = document.createElement('div');
+                header.className = 'search-results-header';
+                header.innerHTML = `
+                    <h2 class="library-section-title" style="margin-bottom: 0;">
+                        Search results
+                        <span class="library-section-count">${results.length}</span>
+                        <span style="color: var(--theme-fg); font-size: 13px; margin-left: 8px; font-weight: normal;">${query}</span>
+                    </h2>
+                    <div class="search-results-actions">
+                        <button id="download-all-btn" class="library-rebuild"><i class="fa-solid fa-download"></i> Download all</button>
+                        <button id="close-search-btn" class="library-rebuild"><i class="fa-solid fa-xmark"></i> Close</button>
+                    </div>
+                `;
+                const grid = document.createElement('div');
+                grid.className = 'library-grid';
+                results.forEach(r => {
+                    const card = document.createElement('div');
+                    card.className = 'library-card';
+                    card.dataset.url = r.url;
+                    card.innerHTML = `
+                        <a class="library-thumb-link" href="/watch?url=${encodeURIComponent(r.url)}">
+                            <div class="library-thumb-wrap">
+                                ${r.thumbnail
+                                    ? `<img loading="lazy" src="${r.thumbnail}" alt="" referrerpolicy="no-referrer">`
+                                    : `<div class="library-thumb-fallback"><i class="fa-solid fa-film"></i></div>`}
+                                ${r.duration ? `<span class="library-duration">${fmtDuration(r.duration)}</span>` : ''}
+                            </div>
+                        </a>
+                        <div class="library-meta">
+                            <a class="library-title" href="/watch?url=${encodeURIComponent(r.url)}" title="">${escapeHtml(r.title || r.url)}</a>
+                            ${r.uploader ? `<div class="library-uploader">${escapeHtml(r.uploader)}</div>` : ''}
+                            ${r.view_count ? `<div class="library-uploader">${fmtCount(r.view_count)}</div>` : ''}
+                        </div>
+                    `;
+                    grid.appendChild(card);
+                });
+                searchResultsEl.innerHTML = '';
+                searchResultsEl.appendChild(header);
+                searchResultsEl.appendChild(grid);
+
+                document.getElementById('close-search-btn').addEventListener('click', () => {
+                    searchResultsEl.style.display = 'none';
+                    searchResultsEl.innerHTML = '';
+                });
+                document.getElementById('download-all-btn').addEventListener('click', () => downloadAll(results));
+            }
+
+            function escapeHtml(s) {
+                return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+            }
+
+            async function downloadAll(results) {
+                const btn = document.getElementById('download-all-btn');
+                btn.disabled = true;
+                const total = results.length;
+                let done = 0;
+                for (const r of results) {
+                    btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${done}/${total}`;
+                    try {
+                        await fetch('/watch?url=' + encodeURIComponent(r.url), { method: 'GET' });
+                    } catch (e) { /* keep going */ }
+                    done++;
+                }
+                btn.innerHTML = `<i class="fa-solid fa-check"></i> Queued ${total}. Rebuild to index them.`;
+                btn.disabled = false;
             }
 
             const noMatchesEl = document.getElementById('no-matches');
