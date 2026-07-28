@@ -124,61 +124,75 @@
                     Already have downloads on disk? Click <strong>Rebuild</strong> to index them.
                 </p>
             {% else %}
-                {% for site, site_entries in grouped.items() %}
-                    <section class="library-section">
-                        <h2 class="library-section-title">
-                            {{ site }}
-                            <span class="library-section-count">{{ site_entries|length }}</span>
-                        </h2>
-                        <div class="library-grid">
-                            {% for e in site_entries %}
-                                <div class="library-card {{ 'is-hidden-card' if e.hidden or e.site_hidden else '' }}" data-url="{{ e.url }}"
-                                     data-site="{{ (e.source_site or '')|lower }}"
-                                     data-cats="{{ (e.categories|join('|'))|lower }}"
-                                     data-tags="{{ (e.tags|join('|'))|lower }}"
-                                     data-hidden="{{ '1' if e.hidden else '0' }}">
-                                    <a class="library-thumb-link" href="/watch?url={{ e.url|urlencode }}">
-                                        <div class="library-thumb-wrap">
-                                            {% if e.has_thumb %}
-                                                <img loading="lazy" src="/t/{{ e.dir_hash }}" alt="">
-                                            {% else %}
-                                                <div class="library-thumb-fallback"><i class="fa-solid fa-film"></i></div>
-                                            {% endif %}
-                                            {% if e.duration %}
-                                                <span class="library-duration">
-                                                    {%- set h = (e.duration // 3600) -%}
-                                                    {%- set m = ((e.duration % 3600) // 60) -%}
-                                                    {%- set s = (e.duration % 60) -%}
-                                                    {%- if h -%}{{ h }}:{{ '%02d' % m }}:{{ '%02d' % s }}{%- else -%}{{ m }}:{{ '%02d' % s }}{%- endif -%}
-                                                </span>
-                                            {% endif %}
-                                        </div>
-                                    </a>
-                                    <div class="library-meta">
-                                        <a class="library-title" href="/watch?url={{ e.url|urlencode }}" title="{{ e.title }}">{{ e.title }}</a>
-                                        {% if e.uploader %}<div class="library-uploader">{{ e.uploader }}</div>{% endif %}
-                                        {% if e.categories or e.tags %}
-                                            <div class="card-chips">
-                                                {% for c in e.categories %}
-                                                    <button class="chip chip-cat chip-sm" data-filter-type="cat" data-filter-name="{{ c }}">{{ c }}</button>
-                                                {% endfor %}
-                                                {% for t in e.tags[:3] %}
-                                                    <button class="chip chip-tag chip-sm" data-filter-type="tag" data-filter-name="{{ t }}">{{ t }}</button>
-                                                {% endfor %}
-                                                {% if e.tags|length > 3 %}
-                                                    <span class="chip-more" title="{{ e.tags[3:]|join(', ') }}">+{{ e.tags|length - 3 }}</span>
-                                                {% endif %}
-                                            </div>
+                <div class="library-toolbar">
+                    <label class="sort-control">
+                        <span>Sort by</span>
+                        <select id="sort-select">
+                            <option value="saved_desc">Recently added</option>
+                            <option value="saved_asc">Oldest first</option>
+                            <option value="title_asc">Title (A→Z)</option>
+                            <option value="title_desc">Title (Z→A)</option>
+                            <option value="duration_desc">Longest first</option>
+                            <option value="duration_asc">Shortest first</option>
+                            <option value="upload_desc">Upload date (newest)</option>
+                            <option value="upload_asc">Upload date (oldest)</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="library-grid" id="library-grid">
+                    {% for e in entries %}
+                        <div class="library-card {{ 'is-hidden-card' if e.hidden or e.site_hidden else '' }}" data-url="{{ e.url }}"
+                             data-site="{{ (e.source_site or '')|lower }}"
+                             data-cats="{{ (e.categories|join('|'))|lower }}"
+                             data-tags="{{ (e.tags|join('|'))|lower }}"
+                             data-hidden="{{ '1' if e.hidden else '0' }}"
+                             data-saved="{{ e.saved_at or 0 }}"
+                             data-duration="{{ e.duration or 0 }}"
+                             data-upload="{{ e.upload_date or '' }}"
+                             data-title="{{ (e.title or '')|lower }}">
+                            <a class="library-thumb-link" href="/watch?url={{ e.url|urlencode }}">
+                                <div class="library-thumb-wrap">
+                                    {% if e.has_thumb %}
+                                        <img loading="lazy" src="/t/{{ e.dir_hash }}" alt="">
+                                    {% else %}
+                                        <div class="library-thumb-fallback"><i class="fa-solid fa-film"></i></div>
+                                    {% endif %}
+                                    {% if e.duration %}
+                                        <span class="library-duration">
+                                            {%- set h = (e.duration // 3600) -%}
+                                            {%- set m = ((e.duration % 3600) // 60) -%}
+                                            {%- set s = (e.duration % 60) -%}
+                                            {%- if h -%}{{ h }}:{{ '%02d' % m }}:{{ '%02d' % s }}{%- else -%}{{ m }}:{{ '%02d' % s }}{%- endif -%}
+                                        </span>
+                                    {% endif %}
+                                </div>
+                            </a>
+                            <div class="library-meta">
+                                <a class="library-title" href="/watch?url={{ e.url|urlencode }}" title="{{ e.title }}">{{ e.title }}</a>
+                                {% if e.uploader %}<div class="library-uploader">{{ e.uploader }}</div>{% endif %}
+                                {% if e.source_site or e.categories or e.tags %}
+                                    <div class="card-chips">
+                                        {% if e.source_site %}
+                                            <button class="chip chip-site chip-sm" data-filter-type="site" data-filter-name="{{ e.source_site }}">{{ e.source_site }}</button>
+                                        {% endif %}
+                                        {% for c in e.categories %}
+                                            <button class="chip chip-cat chip-sm" data-filter-type="cat" data-filter-name="{{ c }}">{{ c }}</button>
+                                        {% endfor %}
+                                        {% for t in e.tags[:3] %}
+                                            <button class="chip chip-tag chip-sm" data-filter-type="tag" data-filter-name="{{ t }}">{{ t }}</button>
+                                        {% endfor %}
+                                        {% if e.tags|length > 3 %}
+                                            <span class="chip-more" title="{{ e.tags[3:]|join(', ') }}">+{{ e.tags|length - 3 }}</span>
                                         {% endif %}
                                     </div>
-                                    <button class="library-hide" title="{{ 'Unhide' if e.hidden else 'Hide' }}" aria-label="{{ 'Unhide' if e.hidden else 'Hide' }}">
-                                        <i class="fa-solid {{ 'fa-eye' if e.hidden else 'fa-eye-slash' }}"></i>
-                                    </button>
-                                </div>
-                            {% endfor %}
+                                {% endif %}
+                            </div>
+                            <button class="library-hide" title="{{ 'Unhide' if e.hidden else 'Hide' }}" aria-label="{{ 'Unhide' if e.hidden else 'Hide' }}">
+                                <i class="fa-solid {{ 'fa-eye' if e.hidden else 'fa-eye-slash' }}"></i>
+                            </button>
                         </div>
-                    </section>
-                {% endfor %}
+                    {% endfor %}
+                </div>
             {% endif %}
             <footer class="library-footer">
                 <a href="https://github.com/Matszwe02/ytdlp_web_player" target="_blank" class="footer-link">
@@ -385,12 +399,13 @@
             }
 
             const noMatchesEl = document.getElementById('no-matches');
+            const gridEl = document.getElementById('library-grid');
             const cards = Array.from(document.querySelectorAll('.library-card'));
-            const sections = Array.from(document.querySelectorAll('.library-section'));
             const activeFiltersEl = document.getElementById('active-filters');
             const activeChipList = document.getElementById('active-chip-list');
             const clearFiltersBtn = document.getElementById('clear-filters');
             const showMoreTagsBtn = document.getElementById('show-more-tags');
+            const sortSelect = document.getElementById('sort-select');
 
             const activeFilters = { site: new Set(), cat: new Set(), tag: new Set() };
             const FILTER_ATTR = { site: 'data-site', cat: 'data-cats', tag: 'data-tags' };
@@ -415,7 +430,7 @@
 
             function renderActiveFilters() {
                 if (!activeFiltersEl || !activeChipList) return;
-                const total = activeFilters.cat.size + activeFilters.tag.size;
+                const total = activeFilters.site.size + activeFilters.cat.size + activeFilters.tag.size;
                 if (total === 0) {
                     activeFiltersEl.style.display = 'none';
                     return;
@@ -452,12 +467,40 @@
                     card.style.display = match ? '' : 'none';
                     if (match) anyVisible = true;
                 });
-                sections.forEach(section => {
-                    const visible = section.querySelectorAll('.library-card:not([style*="display: none"])').length;
-                    section.style.display = visible ? '' : 'none';
-                });
                 const anyFilter = q || activeFilters.site.size || activeFilters.cat.size || activeFilters.tag.size;
                 if (noMatchesEl) noMatchesEl.style.display = (anyFilter && !anyVisible) ? '' : 'none';
+            }
+
+            const SORT_FNS = {
+                saved_desc:    (a, b) => (+b.dataset.saved) - (+a.dataset.saved),
+                saved_asc:     (a, b) => (+a.dataset.saved) - (+b.dataset.saved),
+                title_asc:     (a, b) => (a.dataset.title || '').localeCompare(b.dataset.title || ''),
+                title_desc:    (a, b) => (b.dataset.title || '').localeCompare(a.dataset.title || ''),
+                duration_desc: (a, b) => (+b.dataset.duration) - (+a.dataset.duration),
+                duration_asc:  (a, b) => (+a.dataset.duration) - (+b.dataset.duration),
+                upload_desc:   (a, b) => (b.dataset.upload || '').localeCompare(a.dataset.upload || ''),
+                upload_asc:    (a, b) => (a.dataset.upload || '').localeCompare(b.dataset.upload || ''),
+            };
+
+            function applySort(key) {
+                const fn = SORT_FNS[key] || SORT_FNS.saved_desc;
+                if (!gridEl) return;
+                const sorted = cards.slice().sort(fn);
+                const frag = document.createDocumentFragment();
+                sorted.forEach(c => frag.appendChild(c));
+                gridEl.appendChild(frag);
+                try { localStorage.setItem('library_sort', key); } catch (e) {}
+            }
+
+            if (sortSelect) {
+                const savedKey = (() => {
+                    try { return localStorage.getItem('library_sort'); } catch (e) { return null; }
+                })();
+                if (savedKey && SORT_FNS[savedKey]) sortSelect.value = savedKey;
+                sortSelect.addEventListener('change', () => applySort(sortSelect.value));
+                // Initial sort matches the selector (server order is already saved_desc,
+                // so re-sort only if user has a different saved preference)
+                if (savedKey && savedKey !== 'saved_desc') applySort(savedKey);
             }
 
             function toggleFilter(type, name) {

@@ -1055,6 +1055,42 @@ body.library-body
 }
 
 
+.library-toolbar
+{
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 4px 0 12px;
+    gap: 12px;
+}
+
+.sort-control
+{
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--theme-fg);
+    font-size: 13px;
+}
+
+.sort-control select
+{
+    background-color: var(--theme-bg-light);
+    color: white;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.sort-control select:hover
+{
+    border-color: #555;
+}
+
+
 .url-bar-help
 {
     margin: 8px 0 0;
