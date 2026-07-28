@@ -77,19 +77,22 @@ def delete_old_files():
             continue
         print(f"Running periodic removal of old files")
         try:
-            for item_name in os.listdir(data_path):
-                vid_path = os.path.join(data_path, item_name)
-                if not os.path.isdir(vid_path): continue
-
-                keepalive_file = os.path.join(vid_path, 'keepalive')
-                mtime = 0
-                if os.path.exists(keepalive_file):
-                    with open(keepalive_file, 'r') as f:
-                        mtime = int(f.read())
-                if time.time() - mtime > max_video_age:
-                    print(f"Deleting old directory: {vid_path}")
-                    shutil.rmtree(vid_path)
-
+            cache_root = os.path.join(data_path, 'cache')
+            if os.path.isdir(cache_root):
+                for site in os.listdir(cache_root):
+                    site_dir = os.path.join(cache_root, site)
+                    if not os.path.isdir(site_dir): continue
+                    for item_name in os.listdir(site_dir):
+                        vid_path = os.path.join(site_dir, item_name)
+                        if not os.path.isdir(vid_path): continue
+                        keepalive_file = os.path.join(vid_path, 'keepalive')
+                        mtime = 0
+                        if os.path.exists(keepalive_file):
+                            with open(keepalive_file, 'r') as f:
+                                mtime = int(f.read())
+                        if time.time() - mtime > max_video_age:
+                            print(f"Deleting old directory: {vid_path}")
+                            shutil.rmtree(vid_path)
         except Exception as e:
             print(f"Error in delete_old_files: {e}")
 
@@ -99,9 +102,13 @@ def delete_old_files():
 
 if __name__ == '__main__':
 
+    # Clean up stale Processes PID tracker files (only). Do NOT touch other
+    # root files like library.db, .env, cookies.txt, app.log.
     for item_name in os.listdir(data_path):
         item = os.path.join(data_path, item_name)
-        if not os.path.isdir(item): os.remove(item)
+        if not os.path.isdir(item) and item_name.isdigit():
+            try: os.remove(item)
+            except OSError: pass
 
     Thread(target=delete_old_files, daemon=True).start()
     import uvicorn

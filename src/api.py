@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from urllib.parse import quote_plus
 
@@ -24,6 +25,7 @@ from threading import Thread
 import library_db
 import log_capture
 from external import External
+from main import data_path
 from addons import (
     Processes,
     backfill_duration,
@@ -76,14 +78,54 @@ def _err(msg, status=400, **extra):
     return jsonify(payload), status
 
 
-def _normalize_url_arg(name='url'):
-    raw = request.args.get(name) or (request.get_json(silent=True) or {}).get(name) if request.method != 'GET' else request.args.get(name)
-    if not raw:
+_ID_RE = re.compile(r'^[a-f0-9]{40}$')
+
+
+def _url_from_id(dir_hash):
+    """Given a dir_hash, resolve back to the source URL. Prefer library_db
+    (fast, indexed), fall back to reading meta.json from the dir on disk."""
+    if not dir_hash or not _ID_RE.match(dir_hash):
         return None
-    try:
-        return normalize_url(raw)
-    except Exception:
-        return raw
+    url = library_db.get_url_by_hash(dir_hash)
+    if url: return url
+    # Fallback: scan the cache dirs for a matching hash + read its meta.json
+    data_dir = library_db.data_dir_for_hash(dir_hash)
+    if data_dir:
+        meta_path = os.path.join(data_dir, 'meta.json')
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, 'r') as f:
+                    m = json.load(f)
+                u = m.get('original_url')
+                if u: return u
+            except Exception:
+                pass
+    return None
+
+
+def _get_body_val(name):
+    if request.method == 'GET': return None
+    body = request.get_json(silent=True) or {}
+    return body.get(name)
+
+
+def _get_url():
+    """Resolve the target URL from either ?id= (dir_hash) or ?url= param.
+    Prefers id since it doesn't leak the source domain into the request line."""
+    id_arg = (request.args.get('id') or _get_body_val('id') or '').strip().lower()
+    if id_arg:
+        u = _url_from_id(id_arg)
+        if u:
+            try: return normalize_url(u)
+            except Exception: return u
+    raw = request.args.get('url') or _get_body_val('url')
+    if not raw: return None
+    try: return normalize_url(raw)
+    except Exception: return raw
+
+
+# Back-compat alias — used by earlier code in this file
+_normalize_url_arg = _get_url
 
 
 def _int(name, default=None):
@@ -173,12 +215,15 @@ def library_videos():
 
     for v in filtered:
         u = v.get('url') or ''
+        h = v.get('dir_hash') or ''
+        v['id'] = h
+        if h:
+            v['thumb_url'] = f'/t/{h}'
+            v['api_url'] = f'/api/v1/videos?id={h}'
+            v['streams_url'] = f'/api/v1/videos/streams?id={h}'
         if u:
-            enc = quote_plus(u)
-            v['watch_url'] = f'/watch?url={enc}'
-            v['thumb_url'] = f'/thumb?url={enc}'
-            v['api_url'] = f'/api/v1/videos?url={enc}'
-            v['streams_url'] = f'/api/v1/videos/streams?url={enc}'
+            # /watch still takes ?url= since it may be called for uncached URLs
+            v['watch_url'] = f'/watch?url={quote_plus(u)}'
 
     return jsonify({
         "total": total,
@@ -307,17 +352,17 @@ def video_details():
             v = meta.get(k)
             if v is not None and v != '':
                 highlights[k] = v
-    enc = quote_plus(url)
     return jsonify({
+        "id": dir_hash,
         "url": url,
         "dir_hash": dir_hash,
         "has_meta": meta is not None,
         "meta_highlights": highlights,
         "files": files,
-        "watch_url": f"/watch?url={enc}",
-        "thumb_url": f"/thumb?url={enc}",
-        "meta_url": f"/api/v1/videos/meta?url={enc}",
-        "streams_url": f"/api/v1/videos/streams?url={enc}",
+        "watch_url": f"/watch?url={quote_plus(url)}",
+        "thumb_url": f"/t/{dir_hash}",
+        "meta_url": f"/api/v1/videos/meta?id={dir_hash}",
+        "streams_url": f"/api/v1/videos/streams?id={dir_hash}",
     }), 200
 
 
@@ -341,6 +386,7 @@ def video_streams():
     except Exception as e:
         return _err(str(e), 500)
     enc = quote_plus(url)
+    dir_hash = library_db.dir_hash(url)
     options = []
     for res in formats:
         options.append({
@@ -356,6 +402,7 @@ def video_streams():
         "download": f"/download?url={enc}&quality=audio",
     })
     return jsonify({
+        "id": dir_hash,
         "url": url,
         "watch_url": f"/watch?url={enc}",
         "options": options,
@@ -364,10 +411,10 @@ def video_streams():
 
 @bp.route('/videos/thumb', methods=['GET', 'OPTIONS'])
 def video_thumb_redirect():
-    url = _normalize_url_arg()
-    if not url: return _err("url parameter required")
+    url = _get_url()
+    if not url: return _err("id or url parameter required")
     from flask import redirect
-    return redirect(f'/thumb?url={url}', code=302)
+    return redirect(f'/t/{library_db.dir_hash(url)}', code=302)
 
 
 # ---------- Search ----------
@@ -409,7 +456,12 @@ def api_search():
             "duration": int(e.get('duration') or 0),
             "thumbnail": thumb or '',
             "view_count": e.get('view_count'),
-            "id": e.get('id') or '',
+            # Extractor-provided source id (e.g. YouTube video id) — for display
+            "source_id": e.get('id') or '',
+            # Our cache id (what you'd use to reference this once downloaded).
+            # Client can POST /videos?url=<url> to trigger the download, then
+            # subsequent requests can use this id.
+            "id": library_db.dir_hash(u),
         })
     return jsonify({"count": len(results), "results": results}), 200
 

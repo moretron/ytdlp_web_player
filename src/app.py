@@ -1,8 +1,13 @@
 import os
 import json
+import mimetypes
 import shutil
 import signal
 import sys
+
+mimetypes.add_type('video/mp2t', '.ts')
+mimetypes.add_type('video/iso.segment', '.m4s')
+mimetypes.add_type('application/vnd.apple.mpegurl', '.m3u8')
 from flask import Flask, render_template, request, jsonify, Response
 from io import BytesIO
 from starlette.middleware.wsgi import WSGIMiddleware
@@ -318,6 +323,27 @@ def _serve_sprite_tile(sprite_path):
         return Response(buf.read(), mimetype='image/jpeg')
 
 
+import re as _re
+_DIR_HASH_RE = _re.compile(r'^[a-f0-9]{40}$')
+
+
+@app.route('/t/<dir_hash>')
+@app.route('/t/<dir_hash>.jpg')
+def serve_thumbnail_by_hash(dir_hash):
+    if not _DIR_HASH_RE.match(dir_hash):
+        return jsonify({"error": "invalid hash"}), 400
+    data_dir = library_db.data_dir_for_hash(dir_hash)
+    if not data_dir:
+        return jsonify({"error": "not found"}), 404
+    thumb_path = os.path.join(data_dir, 'thumb.jpg')
+    if os.path.exists(thumb_path):
+        return send_file_partial(thumb_path)
+    sprite_path = os.path.join(data_dir, 'sprite.jpg')
+    if os.path.exists(sprite_path):
+        return _serve_sprite_tile(sprite_path)
+    return jsonify({"error": "no thumb or sprite"}), 404
+
+
 @app.route('/thumb')
 def serve_thumbnail():
     try:
@@ -478,6 +504,7 @@ def download_hls():
 
 @app.route('/hls_segment')
 def hls_segment():
+    import time as _time
     url = get_url(request)
     data_dir = get_data_dir(url)
     quality = request.args.get('quality')
@@ -486,8 +513,20 @@ def hls_segment():
 
     if not os.path.exists(file):
         media_type = f'hls-{quality}'.removesuffix('-')
+        # Kick off (or ensure) the HLS build in the background.
         host_file(get_url(request), media_type)
-        return jsonify({"error": "File not found"}), 404
+        # Poll briefly: strict clients (libmpv/media_kit) give up on immediate 404,
+        # so wait up to ~15s for ffmpeg to produce this segment before returning.
+        deadline = _time.time() + 15
+        while _time.time() < deadline:
+            if os.path.exists(file):
+                break
+            _time.sleep(0.25)
+        if not os.path.exists(file):
+            resp = jsonify({"error": "Segment not ready"})
+            resp.status_code = 503
+            resp.headers['Retry-After'] = '2'
+            return resp
 
     return send_file_partial(file)
 

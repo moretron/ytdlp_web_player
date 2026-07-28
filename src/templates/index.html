@@ -129,7 +129,7 @@
                                     <a class="library-thumb-link" href="/watch?url={{ e.url|urlencode }}">
                                         <div class="library-thumb-wrap">
                                             {% if e.has_thumb %}
-                                                <img loading="lazy" src="/thumb?url={{ e.url|urlencode }}" alt="">
+                                                <img loading="lazy" src="/t/{{ e.dir_hash }}" alt="">
                                             {% else %}
                                                 <div class="library-thumb-fallback"><i class="fa-solid fa-film"></i></div>
                                             {% endif %}

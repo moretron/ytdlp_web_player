@@ -3,7 +3,7 @@
 Base URL: `http://<host>:5000/api/v1`
 
 - All responses are JSON. Errors: `{"error": "message", ...}`.
-- URLs are always passed as `?url=` query parameters (never as path segments) — video URLs contain reserved characters.
+- **Identifying a video:** endpoints that operate on a single video accept **either** `?id=<hash>` **or** `?url=<source-url>`. Prefer `?id=` for anything already in the library — it's an opaque sha1 hash of the URL, so it doesn't leak the source domain into request lines (which URL-based blockers / DNS filters / proxies sometimes match on). `?url=` is required for new URLs the server hasn't seen yet (e.g. adding a video). The same `id` is exposed as `dir_hash` in list responses and as `id` in `/search` results.
 - **Auth:** optional. Set `API_KEY` in `data/.env` to require an `X-API-Key` header on every request. If `API_KEY` is unset, the API is open.
 - **CORS:** `Access-Control-Allow-Origin: *` on every response; `OPTIONS` preflight supported. Native apps, mobile apps, and cross-origin web clients can all consume the API.
 
@@ -65,16 +65,19 @@ Response:
       "site_hidden": false,
       "tags": ["..."],
       "categories": ["..."],
+      "id": "abc123...",
       "watch_url": "/watch?url=...",
-      "thumb_url": "/thumb?url=...",
-      "api_url": "/api/v1/videos?url=...",
-      "streams_url": "/api/v1/videos/streams?url=..."
+      "thumb_url": "/t/abc123...",
+      "api_url": "/api/v1/videos?id=abc123...",
+      "streams_url": "/api/v1/videos/streams?id=abc123..."
     }
   ]
 }
 ```
 
-`thumb_url` transparently falls back to a sprite tile when the source didn't provide a proper thumbnail.
+- `id` is the same value as `dir_hash` — a 40-char sha1 of the source URL. Use it as `?id=` on any single-video endpoint.
+- `thumb_url` uses the opaque id (bypasses URL-based blockers) and transparently falls back to a sprite tile when the source didn't provide a proper thumbnail.
+- `watch_url` still uses `?url=` since /watch is not currently an id-aware route.
 
 ### `GET /library/tags?hidden=false`
 
@@ -128,34 +131,37 @@ Hide every video from that source site.
 
 ### `POST /videos?url=<url>`
 
-Add a URL to the library. Returns immediately (202) and kicks off background preload (meta + thumb + hls-audio) and library sync.
+Add a URL to the library. Requires `?url=` (an `id` would be circular — you don't have one yet for a new video). Returns immediately (202) and kicks off background preload (meta + thumb + hls-audio) and library sync.
 
 ```json
 {"ok": true, "url": "...", "dir_hash": "..."}
 ```
 
-### `GET /videos?url=<url>`
+The returned `dir_hash` is the id you'll use for all subsequent requests on this video.
+
+### `GET /videos?id=<hash>` or `?url=<url>`
 
 Full details: meta highlights, files on disk, and convenience URLs.
 
 ```json
 {
+  "id": "abc123...",
   "url": "...",
-  "dir_hash": "...",
+  "dir_hash": "abc123...",
   "has_meta": true,
   "meta_highlights": {"extractor": "...", "title": "...", "duration": 380, ...},
   "files": [{"name": "video-720.mp4", "size": 12345678, "is_dir": false}, ...],
-  "thumb_url": "/api/v1/videos/thumb?url=...",
-  "meta_url": "/api/v1/videos/meta?url=...",
-  "streams_url": "/api/v1/videos/streams?url=..."
+  "thumb_url": "/t/abc123...",
+  "meta_url": "/api/v1/videos/meta?id=abc123...",
+  "streams_url": "/api/v1/videos/streams?id=abc123..."
 }
 ```
 
-### `GET /videos/meta?url=<url>`
+### `GET /videos/meta?id=<hash>` or `?url=<url>`
 
 The raw cached `meta.json` for the video.
 
-### `GET /videos/streams?url=<url>`
+### `GET /videos/streams?id=<hash>` or `?url=<url>`
 
 Playback URL options across formats. Each entry gives HLS, direct, and download URLs for a quality.
 
@@ -172,9 +178,9 @@ Playback URL options across formats. Each entry gives HLS, direct, and download 
 
 Fetch any `hls`/`direct` URL through the same server; it'll serve the appropriate manifest or file.
 
-### `GET /videos/thumb?url=<url>`
+### `GET /videos/thumb?id=<hash>` or `?url=<url>`
 
-302 redirect to `/thumb?url=<url>` (which falls back to a sprite tile if no `thumb.jpg` is present).
+302 redirect to `/t/<hash>` (which serves `thumb.jpg` or falls back to a sprite tile).
 
 ---
 
@@ -195,11 +201,15 @@ The `q` must start with a known yt-dlp search prefix (e.g. `ytsearch5:bmw repair
       "duration": 380,
       "thumbnail": "https://...",
       "view_count": 12345,
-      "id": "..."
+      "source_id": "youtube_video_id_here",
+      "id": "abc123..."
     }
   ]
 }
 ```
+
+- `id` is our cache id (sha1 of the URL) — what you'd use as `?id=` after downloading it (`POST /videos?url=<url>`).
+- `source_id` is the extractor's native id (e.g. a YouTube video id) for display / cross-referencing.
 
 Unknown prefix → 400 with `known_prefixes` in the error body.
 

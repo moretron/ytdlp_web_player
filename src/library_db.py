@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import shutil
 import sqlite3
 from hashlib import sha1
 from urllib.parse import urlparse
@@ -10,8 +12,82 @@ from main import data_path
 def dir_hash(url):
     return sha1(url.encode()).hexdigest()
 
+
 DB_PATH = os.path.join(data_path, 'library.db')
+CACHE_ROOT = os.path.join(data_path, 'cache')
 MEDIA_EXTS = ('.mp4', '.webm', '.mkv', '.mp3', '.m4a', '.opus', '.ogg', '.wav')
+_HASH_RE = re.compile(r'^[a-f0-9]{40}$')
+
+
+def source_site(url):
+    try:
+        netloc = urlparse(url).netloc.lower()
+        return netloc.removeprefix('www.') or 'unknown'
+    except Exception:
+        return 'unknown'
+
+
+def data_dir_for(url):
+    """Filesystem path for a URL's cache dir: data/cache/<site>/<hash>/"""
+    return os.path.join(CACHE_ROOT, source_site(url), dir_hash(url))
+
+
+def data_dir_for_hash(dh):
+    """Reverse lookup: given a hash, find the on-disk dir path.
+    Prefers DB lookup (fast); falls back to scanning cache subdirs."""
+    if not dh or not _HASH_RE.match(dh): return None
+    url = get_url_by_hash(dh)
+    if url:
+        p = data_dir_for(url)
+        if os.path.isdir(p): return p
+    if not os.path.isdir(CACHE_ROOT): return None
+    try:
+        for site in os.listdir(CACHE_ROOT):
+            candidate = os.path.join(CACHE_ROOT, site, dh)
+            if os.path.isdir(candidate): return candidate
+    except OSError:
+        pass
+    return None
+
+
+def _migrate_data_layout():
+    """One-time move of legacy data/<hash>/ dirs into data/cache/<site>/<hash>/.
+    Idempotent: safe to run every startup."""
+    if not os.path.isdir(data_path): return
+    moved, skipped = 0, 0
+    for name in os.listdir(data_path):
+        # skip our new home + root files (library.db, .env, app.log, cookies.txt, PID files)
+        if name == 'cache': continue
+        if not _HASH_RE.match(name): continue
+        old = os.path.join(data_path, name)
+        if not os.path.isdir(old): continue
+        # figure out the site
+        site = 'unknown'
+        meta_path = os.path.join(old, 'meta.json')
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, 'r') as f:
+                    m = json.load(f)
+                u = m.get('original_url') or ''
+                if u: site = source_site(u)
+            except Exception:
+                pass
+        target_site_dir = os.path.join(CACHE_ROOT, site)
+        os.makedirs(target_site_dir, exist_ok=True)
+        target = os.path.join(target_site_dir, name)
+        if os.path.exists(target):
+            print(f'[migrate] target already exists, leaving in place: {name}')
+            skipped += 1
+            continue
+        try:
+            shutil.move(old, target)
+            print(f'[migrate] {name} -> cache/{site}/')
+            moved += 1
+        except Exception as e:
+            print(f'[migrate] failed to move {name}: {e}')
+            skipped += 1
+    if moved or skipped:
+        print(f'[migrate] finished: moved={moved}, skipped={skipped}')
 
 
 def _connect():
@@ -23,6 +99,8 @@ def _connect():
 
 def init_db():
     os.makedirs(data_path, exist_ok=True)
+    os.makedirs(CACHE_ROOT, exist_ok=True)
+    _migrate_data_layout()
     with _connect() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS videos (
@@ -222,6 +300,14 @@ def list_categories(include_hidden=False):
     return [dict(r) for r in rows]
 
 
+def get_url_by_hash(dir_hash):
+    """Reverse lookup: dir_hash → url from the videos table."""
+    if not dir_hash: return None
+    with _connect() as conn:
+        row = conn.execute('SELECT url FROM videos WHERE dir_hash = ?', (dir_hash,)).fetchone()
+    return row['url'] if row else None
+
+
 def hide_video(url):
     with _connect() as conn:
         conn.execute("UPDATE videos SET hidden = 1 WHERE url = ?", (url,))
@@ -256,22 +342,41 @@ def delete_video(url):
         _prune_orphans(conn)
 
 
-def source_site(url):
-    try:
-        netloc = urlparse(url).netloc.lower()
-        return netloc.removeprefix('www.') or 'unknown'
-    except Exception:
-        return 'unknown'
-
-
 def _has_media(vid_dir):
-    for f in os.listdir(vid_dir):
-        if not (f.startswith('video-') or f.startswith('audio.') or f.startswith('audio-') or f.startswith('low.')):
-            continue
+    """True if the dir contains genuinely cached content that would play offline.
+
+    Counts:
+      - Local video/audio files (video-*.mp4, audio.mp3, low.mp4, ...)
+      - HLS m3u8 that has at least one locally-generated segment on disk
+
+    Does NOT count:
+      - direct-* manifests (those are pointers to the source CDN, not caches)
+      - hls-*.m3u8 with no segments yet (transcode not done)
+    """
+    try:
+        files = os.listdir(vid_dir)
+    except OSError:
+        return False
+    # Downloaded video / audio files
+    for f in files:
         if f.endswith(('.temp', '.part', '.ytdl')):
             continue
-        if os.path.splitext(f)[1].lower() in MEDIA_EXTS:
-            return True
+        if (f.startswith('video-') or f == 'video.mp4'
+                or f.startswith('audio.') or f.startswith('audio-')
+                or f.startswith('low.')):
+            if os.path.splitext(f)[1].lower() in MEDIA_EXTS:
+                return True
+    # HLS with locally-generated segments
+    for f in files:
+        if not (f.startswith('hls_segment-') and os.path.isdir(os.path.join(vid_dir, f))):
+            continue
+        seg_dir = os.path.join(vid_dir, f)
+        try:
+            for seg_f in os.listdir(seg_dir):
+                if seg_f.endswith('.ts'):
+                    return True
+        except OSError:
+            pass
     return False
 
 
@@ -313,14 +418,15 @@ def _upsert_with_meta(conn, row, tag_names, cat_names):
 
 
 def sync_url(url):
-    """Upsert (or delete) a single URL's library row based on what's on disk. Idempotent."""
+    """Upsert a URL's library row if it has cached media. NEVER deletes —
+    stale rows are cleaned up by rebuild() or explicit delete_video(url)."""
     if not url: return None
     name = dir_hash(url)
-    vid_dir = os.path.join(data_path, name)
+    vid_dir = data_dir_for(url)
     meta_path = os.path.join(vid_dir, 'meta.json')
-    if not os.path.isdir(vid_dir) or not os.path.exists(meta_path) or not _has_media(vid_dir):
-        delete_video(url)
-        return None
+    if not os.path.isdir(vid_dir): return None
+    if not os.path.exists(meta_path): return None
+    if not _has_media(vid_dir): return None
     try:
         with open(meta_path, 'r') as fh:
             meta = json.load(fh)
@@ -337,28 +443,34 @@ def sync_url(url):
 
 def rebuild():
     entries = []
+    if not os.path.isdir(CACHE_ROOT):
+        os.makedirs(CACHE_ROOT, exist_ok=True)
     try:
-        dir_names = os.listdir(data_path)
-    except FileNotFoundError:
-        dir_names = []
-    for name in dir_names:
-        vid_dir = os.path.join(data_path, name)
-        if not os.path.isdir(vid_dir): continue
-        meta_path = os.path.join(vid_dir, 'meta.json')
-        if not os.path.exists(meta_path): continue
-        if not _has_media(vid_dir): continue
-        try:
-            with open(meta_path, 'r') as fh:
-                meta = json.load(fh)
-        except Exception:
-            continue
-        url = meta.get('original_url') or ''
-        if not url: continue
-        entries.append((
-            _row_from_meta(url, name, vid_dir, meta),
-            _clean_labels(meta.get('tags')),
-            _clean_labels(meta.get('categories')),
-        ))
+        sites = os.listdir(CACHE_ROOT)
+    except OSError:
+        sites = []
+    for site in sites:
+        site_dir = os.path.join(CACHE_ROOT, site)
+        if not os.path.isdir(site_dir): continue
+        for name in os.listdir(site_dir):
+            vid_dir = os.path.join(site_dir, name)
+            if not os.path.isdir(vid_dir): continue
+            if not _HASH_RE.match(name): continue
+            meta_path = os.path.join(vid_dir, 'meta.json')
+            if not os.path.exists(meta_path): continue
+            if not _has_media(vid_dir): continue
+            try:
+                with open(meta_path, 'r') as fh:
+                    meta = json.load(fh)
+            except Exception:
+                continue
+            url = meta.get('original_url') or ''
+            if not url: continue
+            entries.append((
+                _row_from_meta(url, name, vid_dir, meta),
+                _clean_labels(meta.get('tags')),
+                _clean_labels(meta.get('categories')),
+            ))
     with _connect() as conn:
         hidden_urls = {r['url'] for r in conn.execute("SELECT url FROM videos WHERE hidden = 1").fetchall()}
         conn.execute("DELETE FROM video_tags")
