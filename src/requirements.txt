@@ -1,7 +1,9 @@
 dotenv
 Flask
 requests
-yt-dlp
+# yt-dlp is installed from the local fork at ../yt-dlp via Dockerfile
+# (see compose.yml `additional_contexts.ytdlp_src`). Do not add yt-dlp here.
 pillow
 uvicorn
 starlette
+markdown

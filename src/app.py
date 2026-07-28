@@ -31,6 +31,32 @@ except Exception as _e:
     print(f'ytdlp_searches.json not loaded: {_e}')
     YTDLP_SEARCH_PREFIXES = []
 
+# Default result count injected when the user omits it (e.g. `ytsearch:cats`
+# -> `ytsearch24:cats`). Applies to every SearchInfoExtractor subclass, so it
+# covers ytsearch, pornhubsearch, phsearch, bilisearch, etc. Override with
+# the env var to change the default (or set to 'all' for all results).
+try:
+    _default_n = os.getenv('YTDLP_SEARCH_DEFAULT_N', '24').strip()
+    YTDLP_SEARCH_DEFAULT_N = 'all' if _default_n.lower() == 'all' else str(int(_default_n))
+except Exception:
+    YTDLP_SEARCH_DEFAULT_N = '24'
+
+# Prefixes that accept an integer count (SearchInfoExtractor subclasses).
+# Introspected at startup so it stays in sync with the installed yt-dlp fork.
+try:
+    import yt_dlp
+    from yt_dlp.extractor.common import SearchInfoExtractor
+    COUNTED_SEARCH_PREFIXES = {
+        ie._SEARCH_KEY.lower()
+        for ie in yt_dlp.list_extractors()
+        if isinstance(ie, SearchInfoExtractor) and getattr(ie, '_SEARCH_KEY', None)
+    }
+    print(f'Detected {len(COUNTED_SEARCH_PREFIXES)} counted search prefixes '
+          f'(default N={YTDLP_SEARCH_DEFAULT_N})')
+except Exception as _e:
+    print(f'Could not enumerate SearchInfoExtractor subclasses: {_e}')
+    COUNTED_SEARCH_PREFIXES = set()
+
 
 app = Flask(__name__)
 app.register_blueprint(api_bp)
@@ -139,6 +165,7 @@ def library_site_unhide():
 
 @app.route('/ytsearch')
 def ytsearch_route():
+    from api import _inject_default_count  # shared with /api/v1/search
     q = request.args.get('q', '').strip()
     if not q: return jsonify({"error": "q parameter required"}), 400
     if YTDLP_SEARCH_PREFIXES:
@@ -148,6 +175,7 @@ def ytsearch_route():
                 "error": "Unknown search prefix. Query must start with one of: " + ", ".join(f"{p}:" for p in YTDLP_SEARCH_PREFIXES),
                 "known_prefixes": YTDLP_SEARCH_PREFIXES,
             }), 400
+    q = _inject_default_count(q, COUNTED_SEARCH_PREFIXES, YTDLP_SEARCH_DEFAULT_N)
     try:
         entries = flat_search(q)
     except Exception as e:
@@ -172,11 +200,56 @@ def ytsearch_route():
             'url': url,
             'uploader': e.get('uploader') or e.get('channel') or '',
             'duration': int(e.get('duration') or 0),
-            'thumbnail': thumb or '',
+            'thumbnail': _proxy_thumb_url(thumb) or '',
             'view_count': e.get('view_count'),
             'id': e.get('id') or '',
         })
     return jsonify({'results': results, 'count': len(results)}), 200
+
+
+@app.route('/search')
+def search_page():
+    """Bookmarkable URL like /search?q=phcategory:teen. Renders the home page;
+    JS in index.html reads ?q= and auto-runs the search."""
+    return _render_home()
+
+
+def _find_api_docs_path():
+    """Locate API_DOCS.md — in Docker it's copied to /app; when running from
+    source it lives one directory above src/."""
+    here = os.path.dirname(__file__)
+    for candidate in (
+        os.path.join(here, 'API_DOCS.md'),
+        os.path.join(here, '..', 'API_DOCS.md'),
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+@app.route('/api/docs')
+def api_docs_page():
+    path = _find_api_docs_path()
+    if not path:
+        return Response('API_DOCS.md not found', status=404, mimetype='text/plain')
+    try:
+        import markdown as _markdown
+    except ImportError:
+        return Response('markdown package not installed', status=500, mimetype='text/plain')
+    with open(path, 'r') as f:
+        md = f.read()
+    body = _markdown.markdown(md, extensions=['tables', 'fenced_code', 'toc'])
+    return render_template('api_docs.html', body=body,
+                           app_title=app_title, theme_color=theme_color, amoled_bg=amoled_bg)
+
+
+@app.route('/api/docs.md')
+def api_docs_raw():
+    path = _find_api_docs_path()
+    if not path:
+        return Response('API_DOCS.md not found', status=404, mimetype='text/plain')
+    with open(path, 'r') as f:
+        return Response(f.read(), mimetype='text/markdown')
 
 
 @app.route('/logs')
@@ -348,6 +421,80 @@ def serve_thumbnail_by_hash(dir_hash):
         except Exception as e:
             pprint_exc(e)
     return jsonify({"error": "no thumb or sprite"}), 404
+
+
+@app.route('/thumb-proxy')
+def serve_thumb_proxy():
+    """Fetch an external CDN thumbnail through the server so the client never
+    connects to the CDN directly (hides client IP). Whitelists common thumb
+    CDNs by default; set THUMB_PROXY_ALLOW_ANY=true to allow any host."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+    import requests as _requests
+
+    raw = (request.args.get('url') or '').strip()
+    if not raw:
+        return jsonify({"error": "url parameter required"}), 400
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return jsonify({"error": "invalid url"}), 400
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        return jsonify({"error": "unsupported url"}), 400
+
+    # SSRF: refuse private/loopback/link-local IPs.
+    try:
+        ip = ipaddress.ip_address(socket.gethostbyname(parsed.hostname))
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return jsonify({"error": "blocked host"}), 400
+    except Exception:
+        return jsonify({"error": "host lookup failed"}), 400
+
+    allow_any = os.getenv('THUMB_PROXY_ALLOW_ANY', 'false').lower() in ('1', 'true', 'yes')
+    if not allow_any:
+        host = parsed.hostname.lower()
+        allowed_suffixes = (
+            '.phncdn.com', '.ytimg.com', '.googleusercontent.com',
+            '.googlevideo.com', '.twimg.com', '.cdninstagram.com',
+            '.tiktokcdn.com', '.tiktokcdn-us.com', '.rdcdn.com',
+            '.redditmedia.com', '.redd.it', '.imgur.com',
+            '.vimeocdn.com', '.dmcdn.net',
+        )
+        if not any(host == s[1:] or host.endswith(s) for s in allowed_suffixes):
+            return jsonify({"error": "host not allowed", "host": host}), 403
+
+    try:
+        r = _requests.get(raw, timeout=15, stream=True, allow_redirects=True,
+                          headers={'User-Agent': 'Mozilla/5.0'})
+    except Exception as e:
+        return jsonify({"error": f"upstream fetch failed: {e}"}), 502
+    if r.status_code >= 400:
+        return jsonify({"error": f"upstream returned {r.status_code}"}), 502
+
+    ctype = (r.headers.get('Content-Type') or 'image/jpeg').split(';')[0].strip()
+    if not ctype.startswith('image/'):
+        return jsonify({"error": "not an image"}), 415
+
+    # 8 MB cap to avoid memory abuse; thumbnails are usually <200 KB.
+    max_bytes = 8 * 1024 * 1024
+    body = bytearray()
+    for chunk in r.iter_content(64 * 1024):
+        body.extend(chunk)
+        if len(body) > max_bytes:
+            return jsonify({"error": "response too large"}), 502
+    resp = Response(bytes(body), mimetype=ctype)
+    resp.headers['Cache-Control'] = 'public, max-age=3600, immutable'
+    return resp
+
+
+def _proxy_thumb_url(u):
+    """Wrap an external thumbnail URL in /thumb-proxy so the client fetches
+    from us, not the CDN. Passes through empty/local URLs unchanged."""
+    if not u or not isinstance(u, str) or u.startswith('/') or u.startswith('data:'):
+        return u
+    from urllib.parse import quote as _quote
+    return f'/thumb-proxy?url={_quote(u, safe="")}'
 
 
 @app.route('/thumb')

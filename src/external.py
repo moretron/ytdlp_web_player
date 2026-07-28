@@ -33,20 +33,11 @@ class External:
 
     @staticmethod
     def download_ytdlp():
-        print('Downloading latest yt-dlp...')
-        try:
-            global yt_dlp
-            External._pip_install('yt-dlp')
-            try:
-                import importlib
-                importlib.reload(yt_dlp)
-                importlib.reload(yt_dlp.version)
-                importlib.util
-            except:
-                import yt_dlp
-                import yt_dlp.version
-        except Exception as e:
-            print(f'Warning: yt-dlp update failed: {e}')
+        # Pinned to the local yt-dlp fork baked into the image. Auto-update
+        # would `pip install --upgrade yt-dlp` from PyPI and clobber the fork,
+        # losing the pornhubsearch/pornhubcategory extractors. Rebuild the
+        # image to pick up upstream changes.
+        print('yt-dlp auto-update skipped (using local fork).')
 
 
     @staticmethod

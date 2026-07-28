@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, viewport-fit=cover, initial-scale=1.0" />
+        <meta name="theme-color" content="{{ theme_color }}">
+        <meta name="color-scheme" content="dark">
+        <title>API docs - {{ app_title }}</title>
+        <link rel="stylesheet" href="{{ url_for('static', filename='fontawesome/css/all.min.css') }}" />
+        <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+        <link rel="icon" type="image/png" href="/favicon.svg">
+        <style>
+            html {
+                --theme-bg: #0e0e0e;
+                --theme-bg-light: #191919;
+                --theme-fg: #ddd;
+                --theme-muted: #888;
+                --border: #2a2a2a;
+            }
+            body { background: var(--theme-bg); color: var(--theme-fg); margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; line-height: 1.55; }
+            .docs-toolbar { display: flex; align-items: center; gap: 16px; padding: 12px 24px; background: var(--theme-bg-light); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
+            .docs-toolbar h1 { margin: 0; font-size: 18px; color: {{ theme_color }}; }
+            .docs-toolbar .library-home { color: {{ theme_color }}; text-decoration: none; font-size: 20px; }
+            .docs-toolbar .toolbar-actions { margin-left: auto; display: flex; gap: 10px; }
+            .docs-toolbar a.raw-link { color: var(--theme-muted); text-decoration: none; font-size: 13px; }
+            .docs-toolbar a.raw-link:hover { color: {{ theme_color }}; }
+            .docs-wrap { max-width: 960px; margin: 0 auto; padding: 32px 24px 96px; }
+            .docs-wrap h1, .docs-wrap h2, .docs-wrap h3, .docs-wrap h4 { color: #fff; margin-top: 1.8em; margin-bottom: 0.5em; }
+            .docs-wrap h1 { font-size: 28px; border-bottom: 1px solid var(--border); padding-bottom: 8px; margin-top: 0; }
+            .docs-wrap h2 { font-size: 22px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+            .docs-wrap h3 { font-size: 17px; color: {{ theme_color }}; }
+            .docs-wrap h4 { font-size: 14px; color: var(--theme-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+            .docs-wrap p { margin: 0.6em 0; }
+            .docs-wrap code { background: var(--theme-bg-light); padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; color: #ffcc99; }
+            .docs-wrap pre { background: var(--theme-bg-light); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; overflow-x: auto; }
+            .docs-wrap pre code { background: transparent; padding: 0; color: #d4d4d4; font-size: 13px; }
+            .docs-wrap a { color: {{ theme_color }}; text-decoration: none; }
+            .docs-wrap a:hover { text-decoration: underline; }
+            .docs-wrap table { border-collapse: collapse; margin: 12px 0; width: 100%; font-size: 14px; }
+            .docs-wrap th, .docs-wrap td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+            .docs-wrap th { background: var(--theme-bg-light); color: #fff; }
+            .docs-wrap hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+            .docs-wrap ul, .docs-wrap ol { padding-left: 24px; }
+            .docs-wrap blockquote { border-left: 3px solid {{ theme_color }}; margin: 12px 0; padding: 4px 14px; color: var(--theme-muted); background: var(--theme-bg-light); border-radius: 0 4px 4px 0; }
+        </style>
+    </head>
+    <body>
+        <div class="docs-toolbar">
+            <a href="/" class="library-home" title="Home"><i class="fa-solid fa-house"></i></a>
+            <h1>API docs</h1>
+            <div class="toolbar-actions">
+                <a class="raw-link" href="/api/docs.md"><i class="fa-solid fa-file-lines"></i> raw markdown</a>
+            </div>
+        </div>
+        <div class="docs-wrap">
+            {{ body|safe }}
+        </div>
+    </body>
+</html>

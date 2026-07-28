@@ -21,12 +21,17 @@ DOC_URL = 'https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/supportedsites
 OUT_PATH = Path(__file__).resolve().parent.parent / 'src' / 'ytdlp_searches.json'
 PREFIX_RE = re.compile(r'"([a-z][a-z0-9]*):"\s+prefix', re.IGNORECASE)
 
+# Prefixes from our local yt-dlp fork that upstream docs don't list. Merged in
+# on every run so a refresh doesn't drop them.
+LOCAL_EXTRAS = ['pornhubsearch', 'pornhubcategory', 'phsearch', 'phcategory']
+
 
 def fetch_prefixes():
     req = urllib.request.Request(DOC_URL, headers={'User-Agent': 'ytdlp-web-player-updater'})
     with urllib.request.urlopen(req, timeout=30) as resp:
         text = resp.read().decode('utf-8')
-    return sorted({m.group(1).lower() for m in PREFIX_RE.finditer(text)})
+    upstream = {m.group(1).lower() for m in PREFIX_RE.finditer(text)}
+    return sorted(upstream | set(LOCAL_EXTRAS))
 
 
 def load_existing():

@@ -420,6 +420,14 @@ class MediaDownloader:
         except Exception as e:
             print(f"Error cropping thumbnail: {e}")
 
+        # Final fallback: if we still have no thumb.jpg but a video file is
+        # already on disk, grab a frame from the middle of it with ffmpeg.
+        thumb_path = os.path.join(self.data_dir, 'thumb.jpg')
+        if not os.path.exists(thumb_path):
+            video_path = check_media(url=self.url, media_type='video')
+            if video_path:
+                extract_middle_frame(self.url, video_path, thumb_path, self.meta)
+
 
     def playlist(self):
         query = parse_qs(urlparse(self.url).query).get('q')
@@ -883,6 +891,37 @@ def get_media_duration(url, meta, media):
     raise RuntimeError('Media duration impossible to gather - report this bug')
 
 
+def extract_middle_frame(url, video_path, out_path, meta=None):
+    """Fallback when no thumbnail exists: grab a frame from the midpoint of a
+    cached video with ffmpeg. Placing `-ss` before `-i` uses fast (keyframe)
+    seek, which is fine for a thumb even if not frame-exact."""
+    try:
+        duration = get_media_duration(url, meta or {}, video_path)
+    except Exception as e:
+        print(f'Middle-frame fallback: cannot determine duration for {video_path}: {e}')
+        return False
+    midpoint = max(0.1, float(duration) / 2)
+    ffmpeg_command = [
+        '-ss', f'{midpoint:.2f}',
+        '-i', video_path,
+        '-frames:v', '1',
+        '-q:v', '3',
+        '-y', out_path,
+    ]
+    print(f'Extracting middle-frame thumbnail at {midpoint:.1f}s from {video_path}')
+    ff = FFMPEG(url, ffmpeg_command)
+    if ff.success and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        return True
+    print(f'Middle-frame fallback failed for {video_path}')
+    # Clean up any zero-byte artefact so subsequent runs can retry.
+    try:
+        if os.path.exists(out_path) and os.path.getsize(out_path) == 0:
+            os.remove(out_path)
+    except OSError:
+        pass
+    return False
+
+
 def pprint_exc(e, code = 500):
     error = (re.sub(r'[^\x20-\x7e]',r'', re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", str(e))))
     traceback.print_exception(e)
@@ -938,6 +977,15 @@ def get_meta(url: str):
                     meta = json.load(f)
                 max_meta_age = 60 if meta.get('is_live') else 600
                 if time.time() - meta.get('timestamp') > max_meta_age:
+                    # If the video (or audio) is already fully downloaded to
+                    # local cache, skip CDN revalidation. We don't need a live
+                    # source URL to serve bytes off disk, and re-writing
+                    # meta.json here bumps its mtime, which flows through
+                    # sync_url and makes the entry jump to the top of the
+                    # library sort on every /watch visit.
+                    if not meta.get('is_live') and (
+                            check_media(url, 'video') or check_media(url, 'audio')):
+                        return meta
                     print('Checking metadata validity...')
                     srcs = choose_sources_for_res(get_video_sources(url, meta), get_good_quality(get_video_formats(url, meta)))
                     src = srcs[0] or srcs[1]
@@ -1262,16 +1310,43 @@ def search(query, search_engine='auto'):
     return entries
 
 
+_SEARCH_CACHE = {}  # {query: (expiry_ts, entries)}
+_SEARCH_CACHE_TTL = max(0, int(os.getenv('SEARCH_CACHE_TTL', '3600')))
+_SEARCH_CACHE_MAX = 256
+
+
 def flat_search(query):
     """Run a yt-dlp search query with extract_flat for speed. Preserves clean URLs
-    so results map to the same library entries as direct URL visits."""
+    so results map to the same library entries as direct URL visits.
+
+    Results are cached in-process for SEARCH_CACHE_TTL seconds (default 3600,
+    set 0 to disable). Cache key is the post-rewrite query, so `phcategory:teen`
+    and `phcategory:teen` share a cache entry, and `phcategory10:teen` is
+    a separate one."""
+    now = time.time()
+    if _SEARCH_CACHE_TTL:
+        hit = _SEARCH_CACHE.get(query)
+        if hit and hit[0] > now:
+            print(f'Flat search cache hit for {query}')
+            return hit[1]
+
     print(f'Flat search for {query}')
     ydl_opts = {'quiet': True, 'skip_download': True, 'extract_flat': 'in_playlist', 'default_search': 'auto'}
     ydl_opts.update(ydl_global_opts)
     ydl_opts.pop('playlistend', None)
     ydl_opts.pop('noplaylist', None)
     info = YTDLP.get_info(query, ydl_opts)
-    return info.get('entries') or []
+    entries = info.get('entries') or []
+
+    if _SEARCH_CACHE_TTL:
+        _SEARCH_CACHE[query] = (now + _SEARCH_CACHE_TTL, entries)
+        # Evict expired, then cap to _SEARCH_CACHE_MAX (drop oldest).
+        for k in [k for k, (exp, _) in _SEARCH_CACHE.items() if exp <= now]:
+            _SEARCH_CACHE.pop(k, None)
+        if len(_SEARCH_CACHE) > _SEARCH_CACHE_MAX:
+            for k in sorted(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0])[:len(_SEARCH_CACHE) - _SEARCH_CACHE_MAX]:
+                _SEARCH_CACHE.pop(k, None)
+    return entries
 
 
 def generate_chapters(meta: dict):

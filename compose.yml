@@ -1,6 +1,11 @@
 services:
     ytdlp_web_player:
-        build: .
+        # Build context is the parent directory so the sibling `../yt-dlp`
+        # fork (with pornhubsearch/pornhubcategory) can be baked into the
+        # image. See Dockerfile and Dockerfile.dockerignore.
+        build:
+            context: ..
+            dockerfile: ytdlp_web_player/Dockerfile
         #image: matszwe02/ytdlp_web_player:stable
         volumes:
             - ./data:/app/data

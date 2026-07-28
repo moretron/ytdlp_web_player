@@ -1,11 +1,15 @@
 {
   "source": "https://raw.githubusercontent.com/yt-dlp/yt-dlp/master/supportedsites.md",
-  "count": 12,
+  "count": 16,
   "prefixes": [
     "bilisearch",
     "gvsearch",
     "nicosearch",
     "nicosearchdate",
+    "phcategory",
+    "phsearch",
+    "pornhubcategory",
+    "pornhubsearch",
     "prxseries",
     "prxstories",
     "rkfnsearch",

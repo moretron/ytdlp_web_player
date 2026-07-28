@@ -419,9 +419,27 @@ def video_thumb_redirect():
 
 # ---------- Search ----------
 
+_BARE_PREFIX_RE = re.compile(r'^([a-z][a-z0-9]*):', re.IGNORECASE)
+
+
+def _inject_default_count(q, counted_prefixes, default_n):
+    """Turn `ytsearch:cats` into `ytsearch24:cats` when the user omitted the
+    count. Leaves `ytsearch5:cats` and `ytsearchall:cats` alone, and doesn't
+    touch prefixes that aren't SearchInfoExtractor subclasses (e.g.
+    `pornhubcategory:`, `ytuser:`)."""
+    m = _BARE_PREFIX_RE.match(q)
+    if not m:
+        return q
+    prefix = m.group(1).lower()
+    if prefix not in counted_prefixes:
+        return q
+    return f'{m.group(1)}{default_n}:{q[m.end():]}'
+
+
 @bp.route('/search', methods=['GET', 'OPTIONS'])
 def api_search():
-    from app import YTDLP_SEARCH_PREFIXES  # imported lazily to avoid circular
+    # Imported lazily to avoid circular import at module load.
+    from app import YTDLP_SEARCH_PREFIXES, COUNTED_SEARCH_PREFIXES, YTDLP_SEARCH_DEFAULT_N
     q = (request.args.get('q') or '').strip()
     if not q: return _err("q parameter required")
     if YTDLP_SEARCH_PREFIXES:
@@ -432,6 +450,7 @@ def api_search():
                 400,
                 known_prefixes=YTDLP_SEARCH_PREFIXES,
             )
+    q = _inject_default_count(q, COUNTED_SEARCH_PREFIXES, YTDLP_SEARCH_DEFAULT_N)
     try:
         entries = flat_search(q)
     except Exception as e:
@@ -449,12 +468,13 @@ def api_search():
                 thumb = thumbs[-1].get('url')
         if not thumb and (e.get('ie_key') == 'Youtube' or 'youtube' in (e.get('extractor') or '').lower()) and e.get('id'):
             thumb = f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"
+        from app import _proxy_thumb_url
         results.append({
             "title": e.get('title') or u,
             "url": u,
             "uploader": e.get('uploader') or e.get('channel') or '',
             "duration": int(e.get('duration') or 0),
-            "thumbnail": thumb or '',
+            "thumbnail": _proxy_thumb_url(thumb) or '',
             "view_count": e.get('view_count'),
             # Extractor-provided source id (e.g. YouTube video id) — for display
             "source_id": e.get('id') or '',

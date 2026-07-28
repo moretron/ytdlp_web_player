@@ -188,18 +188,33 @@ Fetch any `hls`/`direct` URL through the same server; it'll serve the appropriat
 
 ### `GET /search?q=<query>`
 
-The `q` must start with a known yt-dlp search prefix (e.g. `ytsearch5:bmw repair`, `scsearch10:something`).
+The `q` must start with a known yt-dlp search prefix (e.g. `ytsearch5:bmw repair`, `scsearch10:something`, `phsearch:lesbian`).
+
+**Default result count.** If you omit the count (e.g. `ytsearch:cats` instead of `ytsearch24:cats`), the server injects `YTDLP_SEARCH_DEFAULT_N` (env, default `24`; set to `all` for unlimited). Explicit counts and `<prefix>all:` queries are preserved. The rewrite only applies to `SearchInfoExtractor` prefixes — URL-shortcut prefixes like `ytuser:` or `pornhubcategory:` on non-search extractors are unaffected.
+
+**Fork-only prefixes** (only present with the bundled yt-dlp fork):
+
+| prefix | example | notes |
+|---|---|---|
+| `pornhubsearch` | `pornhubsearch10:teen` | Pornhub video search |
+| `phsearch` | `phsearch:teen` | short alias for `pornhubsearch` |
+| `pornhubcategory` | `pornhubcategory20:lesbian` | Videos in a Pornhub category (probes `/categories/<slug>` then `/<slug>`) |
+| `phcategory` | `phcategory:lesbian` | short alias for `pornhubcategory` |
+
+**Caching.** Results are cached in-process for `SEARCH_CACHE_TTL` seconds (env, default `3600`; `0` disables). Cache key is the post-rewrite query, so `phsearch:teen` and `phsearch24:teen` share an entry (both rewrite to the same string).
+
+**Thumbnails are proxied.** The `thumbnail` field in each result is a relative URL like `/thumb-proxy?url=<encoded-cdn-url>`, so the client never connects to the CDN directly. See [`/thumb-proxy`](#get-thumb-proxyurlcdn-url) below.
 
 ```json
 {
-  "count": 5,
+  "count": 24,
   "results": [
     {
       "title": "...",
       "url": "...",
       "uploader": "...",
       "duration": 380,
-      "thumbnail": "https://...",
+      "thumbnail": "/thumb-proxy?url=https%3A%2F%2Fpix-cdn77.phncdn.com%2F...",
       "view_count": 12345,
       "source_id": "youtube_video_id_here",
       "id": "abc123..."
@@ -215,9 +230,26 @@ Unknown prefix → 400 with `known_prefixes` in the error body.
 
 ### `GET /search/prefixes`
 
+Returns every prefix the server will accept (upstream + fork extras).
+
 ```json
-{"prefixes": ["bilisearch", "gvsearch", "nicosearch", ...]}
+{"prefixes": ["bilisearch", "gvsearch", "nicosearch", "phcategory", "phsearch", "pornhubcategory", "pornhubsearch", ...]}
 ```
+
+### `GET /thumb-proxy?url=<cdn-url>`
+
+Streams an image fetched by the server so the client never contacts the CDN. Used automatically for the `thumbnail` field of search results, but callable directly.
+
+- Only `http`/`https` schemes. Private/loopback/link-local IPs are refused (SSRF guard).
+- Host must match a whitelisted CDN suffix by default (`.phncdn.com`, `.ytimg.com`, `.twimg.com`, `.googleusercontent.com`, `.googlevideo.com`, `.cdninstagram.com`, `.tiktokcdn.com`, `.redd.it`, `.imgur.com`, `.vimeocdn.com`, `.dmcdn.net`, …). Set `THUMB_PROXY_ALLOW_ANY=true` to lift the whitelist.
+- Response must be `image/*`, capped at 8 MB.
+- `Cache-Control: public, max-age=3600, immutable` on success.
+
+Errors: `400` for invalid/blocked URL, `403` for disallowed host, `415` for non-image, `502` for upstream failure.
+
+### Browser-only helper: `GET /search?q=<query>` (not `/api/v1/search`)
+
+Bookmarkable HTML page that renders the search UI and auto-runs the query on load. Just a shortcut for the home page; not part of the JSON API.
 
 ---
 

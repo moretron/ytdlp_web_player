@@ -418,6 +418,16 @@
                 btn.disabled = false;
             }
 
+            // Auto-run search when the page is opened with ?q=... (used by
+            // bookmarkable /search?q=phcategory:teen URLs).
+            (function () {
+                const q = new URLSearchParams(window.location.search).get('q');
+                if (q && isYtdlpSearch(q)) {
+                    urlInput.value = q;
+                    runYtdlpSearch(q);
+                }
+            })();
+
             const noMatchesEl = document.getElementById('no-matches');
             const gridEl = document.getElementById('library-grid');
             const cards = Array.from(document.querySelectorAll('.library-card'));

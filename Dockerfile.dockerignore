@@ -1,0 +1,24 @@
+# BuildKit picks this up because it's named <dockerfile>.dockerignore next to
+# the Dockerfile. The build context is the parent of this repo, so we filter
+# out sibling projects and heavy runtime data.
+
+# Unrelated sibling projects in the parent dir
+flutter_ytdlp_player/
+
+# Runtime data (videos, thumbnails, DB) — mounted via volume at runtime, not
+# needed at build time. Excluding this is essential because it can be many GB.
+ytdlp_web_player/data/
+
+# Local dev artefacts
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.egg-info/
+
+# yt-dlp build detritus (not needed for `pip install`)
+yt-dlp/.git/
+yt-dlp/build/
+yt-dlp/dist/
+yt-dlp/test/
