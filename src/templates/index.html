@@ -28,13 +28,6 @@
                     <img src="favicon.svg" alt="" class="home-logo">
                     <h1 style="color: {{ theme_color }};">{{ app_title }}</h1>
                     <span class="library-count">{{ total }} video{{ '' if total == 1 else 's' }}</span>
-                    <a href="{{ '/' if show_hidden else '/?show_hidden=1' }}" class="library-rebuild" title="{{ 'Hide the hidden items again' if show_hidden else 'Show items you have hidden' }}">
-                        <i class="fa-solid {{ 'fa-eye-slash' if show_hidden else 'fa-eye' }}"></i>
-                        {{ 'Hide hidden' if show_hidden else 'Show hidden' }}
-                    </a>
-                    <button id="rebuild" class="library-rebuild" title="Rescan ./data and rebuild the library index">
-                        <i class="fa-solid fa-rotate"></i> Rebuild
-                    </button>
                 </div>
                 <div class="home-url-bar" id="main-input">
                     <input type="text" id="url" name="url" placeholder="Filter library, paste URL, or ytsearch5:your query" autofocus autocomplete="off"/>
@@ -42,6 +35,18 @@
                         <i class="fa-solid fa-play"></i>
                     </button>
                 </div>
+                <details class="url-bar-help">
+                    <summary><i class="fa-solid fa-circle-question"></i> How this box works</summary>
+                    <ul>
+                        <li><strong>Filter library</strong> — just type. Cards filter live by title, uploader, or URL.</li>
+                        <li><strong>Play a URL</strong> — paste any URL yt-dlp supports and hit Enter or the play button.</li>
+                        <li><strong>Empty + Play</strong> — reads a URL from your clipboard and plays it.</li>
+                        <li><strong>Search</strong> — <code>ytsearch5:bmw repair</code> asks yt-dlp to search YouTube for 5 results. <code>ytsearch:</code> alone is I'm-feeling-lucky.</li>
+                        <li>
+                            Other search prefixes: {% for p in search_prefixes %}<code>{{ p }}:</code>{% if not loop.last %}, {% endif %}{% endfor %}
+                        </li>
+                    </ul>
+                </details>
                 <p id="no-matches" class="library-empty" style="display: none; margin-top: 24px;">No videos match that filter.</p>
                 <div id="search-results" style="display: none;"></div>
             </header>
@@ -104,6 +109,12 @@
                             </div>
                         </div>
                     {% endif %}
+                    <div class="filter-footer">
+                        <a href="{{ '/' if show_hidden else '/?show_hidden=1' }}" class="filter-hidden-toggle" title="{{ 'Return to normal view' if show_hidden else 'Include items you have hidden' }}">
+                            <i class="fa-solid {{ 'fa-eye-slash' if show_hidden else 'fa-eye' }}"></i>
+                            {{ 'Hide hidden items' if show_hidden else 'Show hidden items' }}
+                        </a>
+                    </div>
                 </div>
             {% endif %}
 
@@ -169,6 +180,17 @@
                     </section>
                 {% endfor %}
             {% endif %}
+            <footer class="library-footer">
+                <a href="https://github.com/Matszwe02/ytdlp_web_player" target="_blank" class="footer-link">
+                    <span title="{{app_version}}"><b>{{app_title}}</b> {{app_version}}</span>
+                </a>
+                <span class="footer-sep">·</span>
+                <span title="{{ydl_version}}">yt-dlp <b>{{ydl_version}}</b></span>
+                <span class="footer-sep">·</span>
+                <span title="{{js_runtime_version[4:]}}">{{js_runtime_version[:4]}} <b>{{js_runtime_version[4:]}}</b></span>
+                <span class="footer-sep">·</span>
+                <span title="{{ffmpeg_version}}">FFmpeg <b>{{ffmpeg_version}}</b></span>
+            </footer>
         </div>
 
         <div id="expandable-menu-container">
@@ -177,16 +199,9 @@
             </button>
             <div id="expandable-content" class="expandable-content">
                 <ul>
+                    <li><a href="javascript:void(0)" id="rebuild" title="Rescan ./data and rebuild the library index"><i class="fa-solid fa-rotate"></i> Rebuild library</a></li>
                     <li><a href="/logs"><i class="fa-solid fa-terminal"></i> Logs</a></li>
                     <li><a href="javascript:void(0)" onclick="copyExtensionScript(event)" id="script-copy"><i class="fa-solid fa-file-code"></i> Copy extension JS</a></li>
-                    <li>
-                        <a href="https://github.com/Matszwe02/ytdlp_web_player" target="_blank">
-                            <span title="{{app_version}}"><i class="fa-solid fa-circle-info"></i> Version:<br><b>{{app_version}}</b><br></span>
-                            <span title="{{ydl_version}}">YT-DLP: <b>{{ydl_version}}</b><br></span>
-                            <span title="{{js_runtime_version[4:]}}">{{js_runtime_version[:4]}}: <b>{{js_runtime_version[4:]}}</b><br></span>
-                            <span title="{{ffmpeg_version}}">FFmpeg: <b>{{ffmpeg_version}}</b><br></span>
-                        </a>
-                    </li>
                 </ul>
             </div>
         </div>
