@@ -51,94 +51,111 @@
                 <div id="search-results" style="display: none;"></div>
             </header>
 
-            {% if all_sites or all_categories or all_tags %}
-                <div class="filter-chips">
-                    <div id="active-filters" class="filter-active-row" style="display: none;">
-                        <span class="filter-label">Active</span>
-                        <div class="chips" id="active-chip-list"></div>
-                        <button id="clear-filters" class="chip-clear">Clear</button>
-                    </div>
-                    {% if all_sites %}
-                        <div class="filter-row">
-                            <span class="filter-label">Sites</span>
-                            <div class="chips">
-                                {% for s in all_sites %}
-                                    <span class="chip-wrap">
-                                        <button class="chip chip-site {{ 'chip-is-hidden' if s.hidden else '' }}" data-filter-type="site" data-filter-name="{{ s.name }}">
-                                            {{ s.name }} <span class="chip-count">{{ s.cnt }}</span>
-                                        </button>
-                                        <button class="chip-hide-toggle" data-site="{{ s.name }}" data-hidden="{{ '1' if s.hidden else '0' }}" title="{{ 'Unhide this site' if s.hidden else 'Hide this site' }}">
-                                            <i class="fa-solid {{ 'fa-eye' if s.hidden else 'fa-eye-slash' }}"></i>
-                                        </button>
-                                    </span>
-                                {% endfor %}
-                            </div>
-                        </div>
-                    {% endif %}
-                    {% if all_categories %}
-                        <div class="filter-row">
-                            <span class="filter-label">Categories</span>
-                            <div class="chips">
-                                {% for c in all_categories %}
-                                    <button class="chip chip-cat" data-filter-type="cat" data-filter-name="{{ c.name }}">
-                                        {{ c.name }} <span class="chip-count">{{ c.cnt }}</span>
-                                    </button>
-                                {% endfor %}
-                            </div>
-                        </div>
-                    {% endif %}
-                    {% if all_tags %}
-                        <div class="filter-row">
-                            <span class="filter-label">Tags</span>
-                            <div class="chips" id="tag-chip-list">
-                                {% for t in all_tags[:15] %}
-                                    <button class="chip chip-tag" data-filter-type="tag" data-filter-name="{{ t.name }}">
-                                        {{ t.name }} <span class="chip-count">{{ t.cnt }}</span>
-                                    </button>
-                                {% endfor %}
-                                {% if all_tags|length > 15 %}
-                                    {% for t in all_tags[15:] %}
-                                        <button class="chip chip-tag chip-tag-more" data-filter-type="tag" data-filter-name="{{ t.name }}" style="display: none;">
-                                            {{ t.name }} <span class="chip-count">{{ t.cnt }}</span>
-                                        </button>
-                                    {% endfor %}
-                                    <button class="chip chip-more-toggle" id="show-more-tags">
-                                        + {{ all_tags|length - 15 }} more
-                                    </button>
-                                {% endif %}
-                            </div>
-                        </div>
-                    {% endif %}
-                    <div class="filter-footer">
-                        <a href="{{ '/' if show_hidden else '/?show_hidden=1' }}" class="filter-hidden-toggle" title="{{ 'Return to normal view' if show_hidden else 'Include items you have hidden' }}">
-                            <i class="fa-solid {{ 'fa-eye-slash' if show_hidden else 'fa-eye' }}"></i>
-                            {{ 'Hide hidden items' if show_hidden else 'Show hidden items' }}
-                        </a>
-                    </div>
-                </div>
-            {% endif %}
-
             {% if total == 0 %}
                 <p class="library-empty">
                     No videos in the library yet. Paste a URL above to play &amp; save one.<br>
                     Already have downloads on disk? Click <strong>Rebuild</strong> to index them.
                 </p>
             {% else %}
-                <div class="library-toolbar">
-                    <label class="sort-control">
-                        <span>Sort by</span>
-                        <select id="sort-select">
-                            <option value="saved_desc">Recently added</option>
-                            <option value="saved_asc">Oldest first</option>
-                            <option value="title_asc">Title (A→Z)</option>
-                            <option value="title_desc">Title (Z→A)</option>
-                            <option value="duration_desc">Longest first</option>
-                            <option value="duration_asc">Shortest first</option>
-                            <option value="upload_desc">Upload date (newest)</option>
-                            <option value="upload_asc">Upload date (oldest)</option>
-                        </select>
-                    </label>
-                </div>
+            <div class="library-shell">
+                <aside class="library-sidebar">
+                    <button class="sidebar-collapse" id="sidebar-toggle" aria-expanded="true">
+                        <i class="fa-solid fa-sliders"></i> Filters
+                        <i class="fa-solid fa-chevron-up sidebar-chevron"></i>
+                    </button>
+                    <div class="sidebar-body" id="sidebar-body">
+                        <div class="sidebar-section">
+                            <label class="sidebar-label" for="sort-select">Sort by</label>
+                            <select id="sort-select" class="sidebar-select">
+                                <option value="saved_desc">Recently added</option>
+                                <option value="saved_asc">Oldest first</option>
+                                <option value="title_asc">Title (A→Z)</option>
+                                <option value="title_desc">Title (Z→A)</option>
+                                <option value="duration_desc">Longest first</option>
+                                <option value="duration_asc">Shortest first</option>
+                                <option value="upload_desc">Upload date (newest)</option>
+                                <option value="upload_asc">Upload date (oldest)</option>
+                            </select>
+                        </div>
+                        <div class="sidebar-section">
+                            <label class="sidebar-label" for="min-count-select">Min count</label>
+                            <select id="min-count-select" class="sidebar-select" title="Hide filter chips that only apply to fewer than N videos">
+                                <option value="1">Show all</option>
+                                <option value="2" selected>2+ videos</option>
+                                <option value="3">3+ videos</option>
+                                <option value="5">5+ videos</option>
+                                <option value="10">10+ videos</option>
+                            </select>
+                        </div>
+
+                        <div id="active-filters" class="sidebar-section" style="display: none;">
+                            <div class="sidebar-label-row">
+                                <span class="sidebar-label">Active</span>
+                                <button id="clear-filters" class="chip-clear">Clear all</button>
+                            </div>
+                            <div class="chips" id="active-chip-list"></div>
+                        </div>
+
+                        {% if all_sites %}
+                            <div class="sidebar-section">
+                                <div class="sidebar-label-row">
+                                    <span class="sidebar-label">Sites</span>
+                                    <span class="sidebar-count">{{ all_sites|length }}</span>
+                                </div>
+                                <div class="chips">
+                                    {% for s in all_sites %}
+                                        <span class="chip-wrap" data-cnt="{{ s.cnt }}">
+                                            <button class="chip chip-site {{ 'chip-is-hidden' if s.hidden else '' }}" data-filter-type="site" data-filter-name="{{ s.name }}">
+                                                {{ s.name }} <span class="chip-count">{{ s.cnt }}</span>
+                                            </button>
+                                            <button class="chip-hide-toggle" data-site="{{ s.name }}" data-hidden="{{ '1' if s.hidden else '0' }}" title="{{ 'Unhide this site' if s.hidden else 'Hide this site' }}">
+                                                <i class="fa-solid {{ 'fa-eye' if s.hidden else 'fa-eye-slash' }}"></i>
+                                            </button>
+                                        </span>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        {% endif %}
+                        {% if all_categories %}
+                            <div class="sidebar-section">
+                                <div class="sidebar-label-row">
+                                    <span class="sidebar-label">Categories</span>
+                                    <span class="sidebar-count">{{ all_categories|length }}</span>
+                                </div>
+                                <div class="chips">
+                                    {% for c in all_categories %}
+                                        <button class="chip chip-cat" data-cnt="{{ c.cnt }}" data-filter-type="cat" data-filter-name="{{ c.name }}">
+                                            {{ c.name }} <span class="chip-count">{{ c.cnt }}</span>
+                                        </button>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        {% endif %}
+                        {% if all_tags %}
+                            <div class="sidebar-section">
+                                <div class="sidebar-label-row">
+                                    <span class="sidebar-label">Tags</span>
+                                    <span class="sidebar-count">{{ all_tags|length }}</span>
+                                </div>
+                                <div class="chips" id="tag-chip-list">
+                                    {% for t in all_tags %}
+                                        <button class="chip chip-tag" data-cnt="{{ t.cnt }}" data-filter-type="tag" data-filter-name="{{ t.name }}">
+                                            {{ t.name }} <span class="chip-count">{{ t.cnt }}</span>
+                                        </button>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        {% endif %}
+
+                        <div class="sidebar-section">
+                            <a href="{{ '/' if show_hidden else '/?show_hidden=1' }}" class="filter-hidden-toggle" title="{{ 'Return to normal view' if show_hidden else 'Include items you have hidden' }}">
+                                <i class="fa-solid {{ 'fa-eye-slash' if show_hidden else 'fa-eye' }}"></i>
+                                {{ 'Hide hidden items' if show_hidden else 'Show hidden items' }}
+                            </a>
+                        </div>
+                    </div>
+                </aside>
+                <main class="library-main">
                 <div class="library-grid" id="library-grid">
                     {% for e in entries %}
                         <div class="library-card {{ 'is-hidden-card' if e.hidden or e.site_hidden else '' }}" data-url="{{ e.url }}"
@@ -193,6 +210,8 @@
                         </div>
                     {% endfor %}
                 </div>
+                </main>
+            </div>
             {% endif %}
             <footer class="library-footer">
                 <a href="https://github.com/Matszwe02/ytdlp_web_player" target="_blank" class="footer-link">
@@ -404,8 +423,10 @@
             const activeFiltersEl = document.getElementById('active-filters');
             const activeChipList = document.getElementById('active-chip-list');
             const clearFiltersBtn = document.getElementById('clear-filters');
-            const showMoreTagsBtn = document.getElementById('show-more-tags');
             const sortSelect = document.getElementById('sort-select');
+            const minCountSelect = document.getElementById('min-count-select');
+            const sidebarToggle = document.getElementById('sidebar-toggle');
+            const sidebarBody = document.getElementById('sidebar-body');
 
             const activeFilters = { site: new Set(), cat: new Set(), tag: new Set() };
             const FILTER_ATTR = { site: 'data-site', cat: 'data-cats', tag: 'data-tags' };
@@ -426,6 +447,7 @@
                     chip.classList.toggle('active', activeFilters[type].has(name));
                 });
                 renderActiveFilters();
+                if (minCountSelect) applyMinCount(minCountSelect.value);
             }
 
             function renderActiveFilters() {
@@ -525,10 +547,42 @@
                 applyFilter();
             });
 
-            if (showMoreTagsBtn) showMoreTagsBtn.addEventListener('click', () => {
-                document.querySelectorAll('.chip-tag-more').forEach(c => c.style.display = '');
-                showMoreTagsBtn.remove();
-            });
+            function applyMinCount(min) {
+                min = parseInt(min, 10) || 1;
+                document.querySelectorAll('.chip[data-cnt], .chip-wrap[data-cnt]').forEach(el => {
+                    const c = parseInt(el.dataset.cnt || '0', 10);
+                    const chip = el.classList.contains('chip') ? el : el.querySelector('.chip');
+                    // Never hide an active filter — user is currently using it
+                    const isActive = chip && chip.classList.contains('active');
+                    el.style.display = (c < min && !isActive) ? 'none' : '';
+                });
+                try { localStorage.setItem('library_min_count', String(min)); } catch (e) {}
+            }
+
+            if (minCountSelect) {
+                const savedMin = (() => {
+                    try { return localStorage.getItem('library_min_count'); } catch (e) { return null; }
+                })();
+                if (savedMin) minCountSelect.value = savedMin;
+                minCountSelect.addEventListener('change', () => applyMinCount(minCountSelect.value));
+                applyMinCount(minCountSelect.value);
+            }
+
+            if (sidebarToggle && sidebarBody) {
+                const collapsed = (() => {
+                    try { return localStorage.getItem('sidebar_collapsed') === '1'; } catch (e) { return false; }
+                })();
+                if (collapsed) {
+                    sidebarBody.classList.add('collapsed');
+                    sidebarToggle.setAttribute('aria-expanded', 'false');
+                }
+                sidebarToggle.addEventListener('click', () => {
+                    const nowCollapsed = !sidebarBody.classList.contains('collapsed');
+                    sidebarBody.classList.toggle('collapsed', nowCollapsed);
+                    sidebarToggle.setAttribute('aria-expanded', String(!nowCollapsed));
+                    try { localStorage.setItem('sidebar_collapsed', nowCollapsed ? '1' : '0'); } catch (e) {}
+                });
+            }
 
             urlInput.addEventListener('input', applyFilter);
 

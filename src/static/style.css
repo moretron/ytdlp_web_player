@@ -1055,27 +1055,103 @@ body.library-body
 }
 
 
-.library-toolbar
+.library-shell
+{
+    display: grid;
+    grid-template-columns: 260px minmax(0, 1fr);
+    gap: 24px;
+    align-items: start;
+}
+
+.library-sidebar
+{
+    position: sticky;
+    top: 12px;
+    max-height: calc(100vh - 24px);
+    display: flex;
+    flex-direction: column;
+    background-color: var(--theme-bg-light);
+    border-radius: 8px;
+    border: 1px solid #2a2a2a;
+    overflow: hidden;
+}
+
+.sidebar-body
+{
+    padding: 12px 14px 14px;
+    overflow-y: auto;
+    flex: 1 1 auto;
+}
+
+.sidebar-body.collapsed
+{
+    display: none;
+}
+
+.sidebar-collapse
 {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
-    padding: 4px 0 12px;
-    gap: 12px;
-}
-
-.sort-control
-{
-    display: inline-flex;
-    align-items: center;
     gap: 8px;
-    color: var(--theme-fg);
+    padding: 10px 14px;
+    background: transparent;
+    color: white;
+    border: none;
+    border-bottom: 1px solid #2a2a2a;
+    cursor: pointer;
+    font-family: inherit;
     font-size: 13px;
+    font-weight: 600;
+    text-align: left;
+    width: 100%;
 }
 
-.sort-control select
+.sidebar-chevron
 {
-    background-color: var(--theme-bg-light);
+    margin-left: auto;
+    font-size: 11px;
+    transition: transform 0.15s ease-out;
+}
+
+.sidebar-collapse[aria-expanded="false"] .sidebar-chevron
+{
+    transform: rotate(180deg);
+}
+
+.sidebar-section
+{
+    margin-bottom: 16px;
+}
+
+.sidebar-section:last-child
+{
+    margin-bottom: 0;
+}
+
+.sidebar-label,
+.sidebar-label-row
+{
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    color: var(--theme-fg);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 6px;
+}
+
+.sidebar-count
+{
+    color: var(--theme-fg);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.7;
+}
+
+.sidebar-select
+{
+    background-color: #1a1a1a;
     color: white;
     border: 1px solid #333;
     border-radius: 6px;
@@ -1083,11 +1159,29 @@ body.library-body
     font-size: 13px;
     cursor: pointer;
     font-family: inherit;
+    width: 100%;
 }
 
-.sort-control select:hover
+.sidebar-select:hover
 {
     border-color: #555;
+}
+
+@media (max-width: 900px)
+{
+    .library-shell
+    {
+        grid-template-columns: minmax(0, 1fr);
+    }
+    .library-sidebar
+    {
+        position: static;
+        max-height: none;
+    }
+    .sidebar-body:not(.collapsed)
+    {
+        max-height: 60vh;
+    }
 }
 
 
