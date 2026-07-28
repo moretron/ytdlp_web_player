@@ -333,14 +333,20 @@ def serve_thumbnail_by_hash(dir_hash):
     if not _DIR_HASH_RE.match(dir_hash):
         return jsonify({"error": "invalid hash"}), 400
     data_dir = library_db.data_dir_for_hash(dir_hash)
-    if not data_dir:
-        return jsonify({"error": "not found"}), 404
-    thumb_path = os.path.join(data_dir, 'thumb.jpg')
-    if os.path.exists(thumb_path):
-        return send_file_partial(thumb_path)
-    sprite_path = os.path.join(data_dir, 'sprite.jpg')
-    if os.path.exists(sprite_path):
-        return _serve_sprite_tile(sprite_path)
+    if data_dir:
+        thumb_path = os.path.join(data_dir, 'thumb.jpg')
+        if os.path.exists(thumb_path):
+            return send_file_partial(thumb_path)
+        sprite_path = os.path.join(data_dir, 'sprite.jpg')
+        if os.path.exists(sprite_path):
+            return _serve_sprite_tile(sprite_path)
+    # Nothing cached — try to (re)fetch via the normal thumb pipeline.
+    url = library_db.get_url_by_hash(dir_hash)
+    if url:
+        try:
+            return host_file(url, 'thumb')
+        except Exception as e:
+            pprint_exc(e)
     return jsonify({"error": "no thumb or sprite"}), 404
 
 

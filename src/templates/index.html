@@ -170,7 +170,8 @@
                             <a class="library-thumb-link" href="/watch?url={{ e.url|urlencode }}">
                                 <div class="library-thumb-wrap">
                                     {% if e.has_thumb %}
-                                        <img loading="lazy" src="/t/{{ e.dir_hash }}" alt="">
+                                        <img loading="lazy" src="/t/{{ e.dir_hash }}" alt=""
+                                             onerror="this.remove(); this.parentElement.insertAdjacentHTML('afterbegin', '<div class=&quot;library-thumb-fallback&quot;><i class=&quot;fa-solid fa-film&quot;></i></div>');">
                                     {% else %}
                                         <div class="library-thumb-fallback"><i class="fa-solid fa-film"></i></div>
                                     {% endif %}
