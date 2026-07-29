@@ -30,7 +30,7 @@
                     <span class="library-count">{{ total }} video{{ '' if total == 1 else 's' }}</span>
                 </div>
                 <div class="home-url-bar" id="main-input">
-                    <input type="text" id="url" name="url" placeholder="Filter library, paste URL, or ytsearch5:your query" autofocus autocomplete="off"/>
+                    <input type="text" id="url" name="url" placeholder="Filter library, paste URL, or &lt;prefix&gt;5:your query" autofocus autocomplete="off"/>
                     <button onclick="handlePlayButtonClick()" id="submit" title="Play URL">
                         <i class="fa-solid fa-play"></i>
                     </button>
@@ -41,9 +41,9 @@
                         <li><strong>Filter library</strong> — just type. Cards filter live by title, uploader, or URL.</li>
                         <li><strong>Play a URL</strong> — paste any URL yt-dlp supports and hit Enter or the play button.</li>
                         <li><strong>Empty + Play</strong> — reads a URL from your clipboard and plays it.</li>
-                        <li><strong>Search</strong> — <code>ytsearch5:bmw repair</code> asks yt-dlp to search YouTube for 5 results. <code>ytsearch:</code> alone is I'm-feeling-lucky.</li>
+                        <li><strong>Search</strong> — <code>&lt;prefix&gt;5:your query</code> asks yt-dlp to search that site for 5 results. Leaving the number off is I'm-feeling-lucky.</li>
                         <li>
-                            Other search prefixes: {% for p in search_prefixes %}<code>{{ p }}:</code>{% if not loop.last %}, {% endif %}{% endfor %}
+                            Available search prefixes: {% for p in search_prefixes %}<code>{{ p }}:</code>{% if not loop.last %}, {% endif %}{% endfor %}
                         </li>
                     </ul>
                 </details>
@@ -566,7 +566,7 @@
             }
 
             // Auto-run search when the page is opened with ?q=... (used by
-            // bookmarkable /search?q=phcategory:teen URLs).
+            // bookmarkable /search?q=<prefix>:terms URLs).
             (function () {
                 const q = new URLSearchParams(window.location.search).get('q');
                 if (q && isYtdlpSearch(q)) {

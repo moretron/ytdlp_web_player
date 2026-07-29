@@ -39,7 +39,7 @@ List videos with optional filters. All filters combine as AND.
 | `limit`    | int         | page size                                           |
 | `offset`   | int         | pagination offset                                   |
 
-Example: `GET /library/videos?site=youtube.com&tag=music&limit=20`
+Example: `GET /library/videos?site=example.com&tag=music&limit=20`
 
 Response:
 ```json
@@ -94,7 +94,7 @@ Response:
 ### `GET /library/sites?hidden=false`
 
 ```json
-{"sites": [{"name": "youtube.com", "cnt": 30, "hidden": false}, ...]}
+{"sites": [{"name": "example.com", "cnt": 30, "hidden": false}, ...]}
 ```
 
 ### `POST /library/rebuild`
@@ -188,20 +188,13 @@ Fetch any `hls`/`direct` URL through the same server; it'll serve the appropriat
 
 ### `GET /search?q=<query>`
 
-The `q` must start with a known yt-dlp search prefix (e.g. `ytsearch5:bmw repair`, `scsearch10:something`, `phsearch:lesbian`).
+The `q` must start with a known yt-dlp search prefix, in the form `<prefix>[count]:<terms>` (e.g. `<prefix>5:cats`). [`/search/prefixes`](#get-searchprefixes) returns the accepted list.
 
-**Default result count.** If you omit the count (e.g. `ytsearch:cats` instead of `ytsearch24:cats`), the server injects `YTDLP_SEARCH_DEFAULT_N` (env, default `24`; set to `all` for unlimited). Explicit counts and `<prefix>all:` queries are preserved. The rewrite only applies to `SearchInfoExtractor` prefixes — URL-shortcut prefixes like `ytuser:` or `pornhubcategory:` on non-search extractors are unaffected.
+**Default result count.** If you omit the count (e.g. `<prefix>:cats` instead of `<prefix>24:cats`), the server injects `YTDLP_SEARCH_DEFAULT_N` (env, default `24`; set to `all` for unlimited). Explicit counts and `<prefix>all:` queries are preserved. The rewrite only applies to `SearchInfoExtractor` prefixes — URL-shortcut prefixes (user/channel/category jumps on non-search extractors) are unaffected.
 
-**Fork-only prefixes** (only present with the bundled yt-dlp fork):
+**Fork-only prefixes.** The bundled yt-dlp fork adds site-specific `…search` and `…category` prefixes on top of upstream's, each with a short alias. They appear in `/search/prefixes` like any other prefix; a `…category` prefix resolves its argument as a slug, probing `/categories/<slug>` then `/<slug>` on the target site.
 
-| prefix | example | notes |
-|---|---|---|
-| `pornhubsearch` | `pornhubsearch10:teen` | Pornhub video search |
-| `phsearch` | `phsearch:teen` | short alias for `pornhubsearch` |
-| `pornhubcategory` | `pornhubcategory20:lesbian` | Videos in a Pornhub category (probes `/categories/<slug>` then `/<slug>`) |
-| `phcategory` | `phcategory:lesbian` | short alias for `pornhubcategory` |
-
-**Caching.** Results are cached in-process for `SEARCH_CACHE_TTL` seconds (env, default `3600`; `0` disables). Cache key is the post-rewrite query, so `phsearch:teen` and `phsearch24:teen` share an entry (both rewrite to the same string).
+**Caching.** Results are cached in-process for `SEARCH_CACHE_TTL` seconds (env, default `3600`; `0` disables). Cache key is the post-rewrite query, so `<prefix>:cats` and `<prefix>24:cats` share an entry (both rewrite to the same string).
 
 **Thumbnails are proxied.** The `thumbnail` field in each result is a relative URL like `/thumb-proxy?url=<encoded-cdn-url>`, so the client never connects to the CDN directly. See [`/thumb-proxy`](#get-thumb-proxyurlcdn-url) below.
 
@@ -214,9 +207,9 @@ The `q` must start with a known yt-dlp search prefix (e.g. `ytsearch5:bmw repair
       "url": "...",
       "uploader": "...",
       "duration": 380,
-      "thumbnail": "/thumb-proxy?url=https%3A%2F%2Fpix-cdn77.phncdn.com%2F...",
+      "thumbnail": "/thumb-proxy?url=https%3A%2F%2Fcdn.example.com%2F...",
       "view_count": 12345,
-      "source_id": "youtube_video_id_here",
+      "source_id": "native_extractor_id_here",
       "id": "abc123..."
     }
   ]
@@ -224,7 +217,7 @@ The `q` must start with a known yt-dlp search prefix (e.g. `ytsearch5:bmw repair
 ```
 
 - `id` is our cache id (sha1 of the URL) — what you'd use as `?id=` after downloading it (`POST /videos?url=<url>`).
-- `source_id` is the extractor's native id (e.g. a YouTube video id) for display / cross-referencing.
+- `source_id` is the extractor's native id (the source site's own video id) for display / cross-referencing.
 
 Unknown prefix → 400 with `known_prefixes` in the error body.
 
@@ -233,7 +226,7 @@ Unknown prefix → 400 with `known_prefixes` in the error body.
 Returns every prefix the server will accept (upstream + fork extras).
 
 ```json
-{"prefixes": ["bilisearch", "gvsearch", "nicosearch", "phcategory", "phsearch", "pornhubcategory", "pornhubsearch", ...]}
+{"prefixes": ["<prefix>", "<prefix>", "<prefix>", "..."]}
 ```
 
 ### `GET /thumb-proxy?url=<cdn-url>`
@@ -241,7 +234,7 @@ Returns every prefix the server will accept (upstream + fork extras).
 Streams an image fetched by the server so the client never contacts the CDN. Used automatically for the `thumbnail` field of search results, but callable directly.
 
 - Only `http`/`https` schemes. Private/loopback/link-local IPs are refused (SSRF guard).
-- Host must match a whitelisted CDN suffix by default (`.phncdn.com`, `.ytimg.com`, `.twimg.com`, `.googleusercontent.com`, `.googlevideo.com`, `.cdninstagram.com`, `.tiktokcdn.com`, `.redd.it`, `.imgur.com`, `.vimeocdn.com`, `.dmcdn.net`, …). Set `THUMB_PROXY_ALLOW_ANY=true` to lift the whitelist.
+- Host must match a whitelisted CDN suffix by default — the image CDNs of the supported sites, listed in `allowed_suffixes` in `src/app.py`. Set `THUMB_PROXY_ALLOW_ANY=true` to lift the whitelist.
 - Response must be `image/*`, capped at 8 MB.
 - `Cache-Control: public, max-age=3600, immutable` on success.
 
@@ -340,18 +333,18 @@ curl 'http://localhost:5000/api/v1/library/videos?limit=50'
 
 **Filter by site + tag:**
 ```bash
-curl 'http://localhost:5000/api/v1/library/videos?site=youtube.com&tag=music'
+curl 'http://localhost:5000/api/v1/library/videos?site=example.com&tag=music'
 ```
 
 **Search and add first result:**
 ```bash
-FIRST=$(curl -s 'http://localhost:5000/api/v1/search?q=ytsearch:bmw+repair' | jq -r '.results[0].url')
+FIRST=$(curl -s 'http://localhost:5000/api/v1/search?q=<prefix>:cats' | jq -r '.results[0].url')
 curl -X POST "http://localhost:5000/api/v1/videos?url=$(python3 -c "from urllib.parse import quote; print(quote('$FIRST'))")"
 ```
 
 **Get playback URLs for a video:**
 ```bash
-curl 'http://localhost:5000/api/v1/videos/streams?url=https%3A%2F%2Fyoutu.be%2Fabc123'
+curl 'http://localhost:5000/api/v1/videos/streams?url=https%3A%2F%2Fexample.com%2Fv%2Fabc123'
 ```
 
 **Hide a site:**
