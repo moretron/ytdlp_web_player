@@ -77,6 +77,7 @@ Response:
 
 - `id` is the same value as `dir_hash` — a 40-char sha1 of the source URL. Use it as `?id=` on any single-video endpoint.
 - `thumb_url` uses the opaque id (bypasses URL-based blockers) and transparently falls back to a sprite tile when the source didn't provide a proper thumbnail.
+- `has_thumb` is `0` (none), `1` (still image) or `2` (still image **plus** an animated preview clip). When it's `2`, `GET /t/<id>.mp4` serves the clip; `/t/<id>` stays a still so `<img>` keeps working.
 - `watch_url` still uses `?url=` since /watch is not currently an id-aware route.
 
 ### `GET /library/tags?hidden=false`
@@ -182,6 +183,8 @@ Fetch any `hls`/`direct` URL through the same server; it'll serve the appropriat
 
 302 redirect to `/t/<hash>` (which serves `thumb.jpg` or falls back to a sprite tile).
 
+`GET /t/<hash>.mp4` serves the animated preview clip when the source supplied one (`has_thumb == 2`), `404` otherwise.
+
 ---
 
 ## Search (via yt-dlp)
@@ -235,10 +238,11 @@ Streams an image fetched by the server so the client never contacts the CDN. Use
 
 - Only `http`/`https` schemes. Private/loopback/link-local IPs are refused (SSRF guard).
 - Host must match a whitelisted CDN suffix by default — the image CDNs of the supported sites, listed in `allowed_suffixes` in `src/app.py`. Set `THUMB_PROXY_ALLOW_ANY=true` to lift the whitelist.
-- Response must be `image/*`, capped at 8 MB.
+- A `Referer` is always sent upstream — thumb CDNs commonly hotlink-protect their assets and answer a refererless request with `403`. Pass `&ref=<source page url>` to send that page as the referer; without it the thumbnail's own origin is used, which is enough for the CDNs seen so far.
+- Response must be `image/*` or `video/*` (some sites serve a short animated preview instead of a still), capped at 8 MB.
 - `Cache-Control: public, max-age=3600, immutable` on success.
 
-Errors: `400` for invalid/blocked URL, `403` for disallowed host, `415` for non-image, `502` for upstream failure.
+Errors: `400` for invalid/blocked URL, `403` for disallowed host, `415` for a non-image/non-video body, `502` for upstream failure. Error bodies carry the failing `url`, the `host`, the upstream `status`/`reason`, the `referer` that was sent, and a short `upstream_body` snippet — the same line is printed to the server log, since an `<img>` never shows you the body.
 
 ### Browser-only helper: `GET /search?q=<query>` (not `/api/v1/search`)
 

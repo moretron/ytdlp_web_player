@@ -116,6 +116,15 @@ class External:
                     app_version = f.read()
         except Exception as e:
             print(e)
+            # No build stamp and no git: fall back to the release number the
+            # repo ships, so a from-source run still reports a version.
+            for candidate in ('VERSION', os.path.join('..', 'VERSION')):
+                try:
+                    with open(candidate, 'r') as f:
+                        app_version = f.read().strip()
+                        return app_version
+                except OSError:
+                    continue
             return '-'
         return app_version
 

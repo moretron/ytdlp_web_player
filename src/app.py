@@ -202,7 +202,7 @@ def ytsearch_route():
             'url': url,
             'uploader': e.get('uploader') or e.get('channel') or '',
             'duration': int(e.get('duration') or 0),
-            'thumbnail': _proxy_thumb_url(thumb) or '',
+            'thumbnail': _proxy_thumb_url(thumb, url) or '',
             'view_count': e.get('view_count'),
             'id': e.get('id') or '',
         })
@@ -211,7 +211,7 @@ def ytsearch_route():
 
 @app.route('/search')
 def search_page():
-    """Bookmarkable URL like /search?q=phcategory:teen. Renders the home page;
+    """Bookmarkable URL like /search?q=<prefix>:terms. Renders the home page;
     JS in index.html reads ?q= and auto-runs the search."""
     return _render_home()
 
@@ -402,6 +402,20 @@ import re as _re
 _DIR_HASH_RE = _re.compile(r'^[a-f0-9]{40}$')
 
 
+@app.route('/t/<dir_hash>.mp4')
+def serve_thumbnail_video_by_hash(dir_hash):
+    """The animated preview clip some sites hand back instead of a still.
+    Kept on a separate route so /t/<hash> stays an image for <img> tags."""
+    if not _DIR_HASH_RE.match(dir_hash):
+        return jsonify({"error": "invalid hash"}), 400
+    data_dir = library_db.data_dir_for_hash(dir_hash)
+    if data_dir:
+        video_thumb = os.path.join(data_dir, 'thumb.mp4')
+        if os.path.exists(video_thumb):
+            return send_file_partial(video_thumb)
+    return jsonify({"error": "no video thumb"}), 404
+
+
 @app.route('/t/<dir_hash>')
 @app.route('/t/<dir_hash>.jpg')
 def serve_thumbnail_by_hash(dir_hash):
@@ -460,11 +474,32 @@ def _thumb_body_snippet(r):
     return _re.sub(r'\s+', ' ', text).strip()[:200]
 
 
+def _thumb_referer(target_url, ref_hint=None):
+    """Referer to send upstream. Thumb CDNs commonly hotlink-protect their
+    images and answer a refererless GET with 403, so we always send one:
+    the source page when the caller told us (``ref``), otherwise the origin
+    of the thumbnail itself, which is enough for the CDNs seen so far."""
+    from urllib.parse import urlparse
+    for candidate in (ref_hint, target_url):
+        if not candidate:
+            continue
+        try:
+            p = urlparse(candidate)
+        except Exception:
+            continue
+        if p.scheme in ('http', 'https') and p.hostname:
+            return f'{p.scheme}://{p.netloc}/'
+    return None
+
+
 @app.route('/thumb-proxy')
 def serve_thumb_proxy():
     """Fetch an external CDN thumbnail through the server so the client never
     connects to the CDN directly (hides client IP). Whitelists common thumb
-    CDNs by default; set THUMB_PROXY_ALLOW_ANY=true to allow any host."""
+    CDNs by default; set THUMB_PROXY_ALLOW_ANY=true to allow any host.
+
+    Serves video thumbnails (animated mp4/webm previews) as well as images —
+    some sites hand back a short clip where others send a JPEG."""
     import ipaddress
     import socket
     from urllib.parse import urlparse
@@ -511,15 +546,20 @@ def serve_thumb_proxy():
                 f'set THUMB_PROXY_ALLOW_ANY=true to permit any host)',
                 403, raw, host=host_l, allowed=' '.join(allowed_suffixes))
 
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    referer = _thumb_referer(raw, request.args.get('ref'))
+    if referer:
+        headers['Referer'] = referer
     try:
         r = _requests.get(raw, timeout=15, stream=True, allow_redirects=True,
-                          headers={'User-Agent': 'Mozilla/5.0'})
+                          headers=headers)
     except Exception as e:
         return _thumb_proxy_error(f'upstream fetch failed for {host}: '
-                                  f'{type(e).__name__}: {e}', 502, raw, host=host)
+                                  f'{type(e).__name__}: {e}', 502, raw, host=host,
+                                  referer=referer)
     if r.status_code >= 400:
         why = _thumb_body_snippet(r)
-        extra = {"host": host, "status": r.status_code}
+        extra = {"host": host, "status": r.status_code, "referer": referer}
         if r.reason:
             extra["reason"] = r.reason
         if r.url != raw:
@@ -533,15 +573,16 @@ def serve_thumb_proxy():
             502, raw, **extra)
 
     ctype = (r.headers.get('Content-Type') or 'image/jpeg').split(';')[0].strip()
-    if not ctype.startswith('image/'):
+    if not (ctype.startswith('image/') or ctype.startswith('video/')):
         why = _thumb_body_snippet(r)
         r.close()
         return _thumb_proxy_error(
-            f'not an image: {host} sent {ctype or "no content-type"}'
+            f'not an image or video: {host} sent {ctype or "no content-type"}'
             + (f' -- {why}' if why else ''),
             415, raw, host=host, content_type=ctype, status=r.status_code)
 
-    # 8 MB cap to avoid memory abuse; thumbnails are usually <200 KB.
+    # 8 MB cap to avoid memory abuse; thumbnails are usually <200 KB, and the
+    # animated previews that come back as video are a couple of MB at most.
     max_bytes = 8 * 1024 * 1024
     body = bytearray()
     for chunk in r.iter_content(64 * 1024):
@@ -556,13 +597,19 @@ def serve_thumb_proxy():
     return resp
 
 
-def _proxy_thumb_url(u):
+def _proxy_thumb_url(u, page_url=None):
     """Wrap an external thumbnail URL in /thumb-proxy so the client fetches
-    from us, not the CDN. Passes through empty/local URLs unchanged."""
+    from us, not the CDN. Passes through empty/local URLs unchanged.
+
+    ``page_url`` is the video page the thumb belongs to; it rides along as
+    ``ref`` so the proxy can send a Referer the CDN's hotlink check accepts."""
     if not u or not isinstance(u, str) or u.startswith('/') or u.startswith('data:'):
         return u
     from urllib.parse import quote as _quote
-    return f'/thumb-proxy?url={_quote(u, safe="")}'
+    proxied = f'/thumb-proxy?url={_quote(u, safe="")}'
+    if page_url:
+        proxied += f'&ref={_quote(page_url, safe="")}'
+    return proxied
 
 
 @app.route('/thumb')
@@ -573,7 +620,11 @@ def serve_thumbnail():
             data_dir = get_data_dir(url)
             thumb_path = os.path.join(data_dir, 'thumb.jpg')
             sprite_path = os.path.join(data_dir, 'sprite.jpg')
-            if not os.path.exists(thumb_path) and os.path.exists(sprite_path):
+            # Name the still explicitly: this route feeds <img> tags, and a
+            # prefix match would happily hand back thumb.mp4 instead.
+            if os.path.exists(thumb_path):
+                return send_file_partial(thumb_path)
+            if os.path.exists(sprite_path):
                 return _serve_sprite_tile(sprite_path)
         return host_file(url, 'thumb')
     except Exception as e:

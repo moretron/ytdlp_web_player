@@ -384,41 +384,55 @@ class MediaDownloader:
             download_media_file(thumb_url, os.path.join(self.data_dir, 'thumb-orig'))
         except Exception as e:
             pprint_exc(e)
-        try:
-            if video_width and video_height:
-                thumb_file = check_media(url=self.url, media_type='thumb-orig')
-                if not thumb_file:
-                    print('Direct thumbnail download did not succeed. Downloading using yt-dlp.')
-                    self.ydl_opts.update({'writethumbnail': True, 'skip_download': True})
-                    YTDLP.download(self.url, self.ydl_opts)
-                    thumb_file = check_media(url=self.url, media_type='thumb-orig')
 
-                with Image.open(thumb_file) as im:
-                    im = im.convert("RGB")
+        # Some sites serve a short animated preview where others serve a still.
+        # Keep the clip as thumb.mp4 and render thumb.jpg off its first frame,
+        # so <img> consumers (og:image, favicon, playlist rows) keep working.
+        orig = check_media(url=self.url, media_type='thumb-orig')
+        if orig and is_video_file(orig):
+            video_thumb = os.path.join(self.data_dir, 'thumb.mp4')
+            try:
+                shutil.move(orig, video_thumb)
+                print(f'Thumbnail is a video preview, kept as {video_thumb}')
+                extract_first_frame(self.url, video_thumb, os.path.join(self.data_dir, 'thumb.jpg'))
+            except Exception as e:
+                pprint_exc(e)
+        else:
+            try:
+                if video_width and video_height:
+                    thumb_file = orig
+                    if not thumb_file:
+                        print('Direct thumbnail download did not succeed. Downloading using yt-dlp.')
+                        self.ydl_opts.update({'writethumbnail': True, 'skip_download': True})
+                        YTDLP.download(self.url, self.ydl_opts)
+                        thumb_file = check_media(url=self.url, media_type='thumb-orig')
 
-                    in_w, in_h = im.size
-                    target_ar = video_width / video_height
-                    if in_w / in_h > target_ar:
-                        new_w = int(in_h * target_ar)
-                        new_h = in_h
-                    else:
-                        new_h = int(in_w / target_ar)
-                        new_w = in_w
+                    with Image.open(thumb_file) as im:
+                        im = im.convert("RGB")
 
-                    left = (in_w - new_w) // 2
-                    top = (in_h - new_h) // 2
-                    right = left + new_w
-                    bottom = top + new_h
+                        in_w, in_h = im.size
+                        target_ar = video_width / video_height
+                        if in_w / in_h > target_ar:
+                            new_w = int(in_h * target_ar)
+                            new_h = in_h
+                        else:
+                            new_h = int(in_w / target_ar)
+                            new_w = in_w
 
-                    im = im.crop((left, top, right, bottom))
-                    im.save(os.path.join(self.data_dir, 'thumb.jpg'), quality=95)
+                        left = (in_w - new_w) // 2
+                        top = (in_h - new_h) // 2
+                        right = left + new_w
+                        bottom = top + new_h
 
-                print(f"Thumbnail cropped using PIL")
-                os.remove(thumb_file)
-            else:
-                print("Video dimensions not found in meta, skipping thumbnail cropping.")
-        except Exception as e:
-            print(f"Error cropping thumbnail: {e}")
+                        im = im.crop((left, top, right, bottom))
+                        im.save(os.path.join(self.data_dir, 'thumb.jpg'), quality=95)
+
+                    print(f"Thumbnail cropped using PIL")
+                    os.remove(thumb_file)
+                else:
+                    print("Video dimensions not found in meta, skipping thumbnail cropping.")
+            except Exception as e:
+                print(f"Error cropping thumbnail: {e}")
 
         # Final fallback: if we still have no thumb.jpg but a video file is
         # already on disk, grab a frame from the middle of it with ffmpeg.
@@ -708,8 +722,18 @@ def check_alerts():
 
 
 def download_media_file(url: str, path_without_ext: str, ext: str|None = None):
-    """Download raw file with requests.get with selected filename"""
-    response = requests.get(url, stream=True, proxies=proxies)
+    """Download raw file with requests.get with selected filename.
+
+    Sends a browser UA and a same-origin Referer: thumbnail CDNs routinely
+    hotlink-protect their assets and answer a refererless GET with 403."""
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        p = urlparse(url)
+        if p.scheme in ('http', 'https') and p.netloc:
+            headers['Referer'] = f'{p.scheme}://{p.netloc}/'
+    except Exception:
+        pass
+    response = requests.get(url, stream=True, proxies=proxies, headers=headers)
     response.raise_for_status()
     if not ext:
         urlpath = url
@@ -889,6 +913,39 @@ def get_media_duration(url, meta, media):
             h, m, s = duration.split(":")
             return int(h)*3600 + int(m)*60 + float(s)
     raise RuntimeError('Media duration impossible to gather - report this bug')
+
+
+def is_video_file(path):
+    """True if the file is really a video container (mp4/mov/webm/mkv) rather
+    than a still. Sniffs magic bytes instead of trusting the name: thumbnail
+    URLs often carry no usable extension, and some CDNs render a still from a
+    path that still ends in `.mp4`."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(16)
+    except Exception:
+        return False
+    if len(head) < 12:
+        return False
+    return head[4:8] == b'ftyp' or head[:4] == b'\x1a\x45\xdf\xa3'
+
+
+def extract_first_frame(url, video_path, out_path):
+    """Render a still from the start of a video thumbnail. Unlike
+    extract_middle_frame this doesn't seek by duration — a preview clip runs
+    for a few seconds and has nothing to do with the video's own length."""
+    ffmpeg_command = ['-i', video_path, '-frames:v', '1', '-q:v', '3', '-y', out_path]
+    print(f'Rendering still thumbnail from {video_path}')
+    ff = FFMPEG(url, ffmpeg_command)
+    if ff.success and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        return True
+    print(f'Could not render a still from {video_path}')
+    try:
+        if os.path.exists(out_path) and os.path.getsize(out_path) == 0:
+            os.remove(out_path)
+    except Exception:
+        pass
+    return False
 
 
 def extract_middle_frame(url, video_path, out_path, meta=None):

@@ -421,6 +421,17 @@ def _has_media(vid_dir):
     return False
 
 
+def _thumb_kind(vid_dir):
+    """0 = no thumb, 1 = still image, 2 = still plus an animated preview clip.
+    Stays truthy for every "has a thumb" check that predates the clip."""
+    if os.path.exists(os.path.join(vid_dir, 'thumb.mp4')):
+        return 2
+    if (os.path.exists(os.path.join(vid_dir, 'thumb.jpg'))
+            or os.path.exists(os.path.join(vid_dir, 'sprite.jpg'))):
+        return 1
+    return 0
+
+
 def _row_from_meta(url, name, vid_dir, meta):
     return (
         url,
@@ -432,8 +443,7 @@ def _row_from_meta(url, name, vid_dir, meta):
         meta.get('width'),
         meta.get('height'),
         meta.get('upload_date') or '',
-        1 if (os.path.exists(os.path.join(vid_dir, 'thumb.jpg'))
-              or os.path.exists(os.path.join(vid_dir, 'sprite.jpg'))) else 0,
+        _thumb_kind(vid_dir),
         int(os.path.getmtime(os.path.join(vid_dir, 'meta.json'))),
     )
 

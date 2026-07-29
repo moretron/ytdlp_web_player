@@ -474,9 +474,9 @@ def api_search():
             "url": u,
             "uploader": e.get('uploader') or e.get('channel') or '',
             "duration": int(e.get('duration') or 0),
-            "thumbnail": _proxy_thumb_url(thumb) or '',
+            "thumbnail": _proxy_thumb_url(thumb, u) or '',
             "view_count": e.get('view_count'),
-            # Extractor-provided source id (e.g. YouTube video id) — for display
+            # Extractor-provided source id (the site's own id) — for display
             "source_id": e.get('id') or '',
             # Our cache id (what you'd use to reference this once downloaded).
             # Client can POST /videos?url=<url> to trigger the download, then

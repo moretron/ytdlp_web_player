@@ -25,8 +25,10 @@
         <div class="library-page">
             <header class="home-header">
                 <div class="home-title-row">
-                    <img src="favicon.svg" alt="" class="home-logo">
-                    <h1 style="color: {{ theme_color }};">{{ app_title }}</h1>
+                    <a class="home-title-link" href="/" title="Back to the library">
+                        <img src="favicon.svg" alt="" class="home-logo">
+                        <h1 style="color: {{ theme_color }};">{{ app_title }}</h1>
+                    </a>
                     <span class="library-count">{{ total }} video{{ '' if total == 1 else 's' }}</span>
                 </div>
                 <div class="home-url-bar" id="main-input">
@@ -35,18 +37,6 @@
                         <i class="fa-solid fa-play"></i>
                     </button>
                 </div>
-                <details class="url-bar-help">
-                    <summary><i class="fa-solid fa-circle-question"></i> How this box works</summary>
-                    <ul>
-                        <li><strong>Filter library</strong> — just type. Cards filter live by title, uploader, or URL.</li>
-                        <li><strong>Play a URL</strong> — paste any URL yt-dlp supports and hit Enter or the play button.</li>
-                        <li><strong>Empty + Play</strong> — reads a URL from your clipboard and plays it.</li>
-                        <li><strong>Search</strong> — <code>&lt;prefix&gt;5:your query</code> asks yt-dlp to search that site for 5 results. Leaving the number off is I'm-feeling-lucky.</li>
-                        <li>
-                            Available search prefixes: {% for p in search_prefixes %}<code>{{ p }}:</code>{% if not loop.last %}, {% endif %}{% endfor %}
-                        </li>
-                    </ul>
-                </details>
                 <p id="no-matches" class="library-empty" style="display: none; margin-top: 24px;">No videos match that filter.</p>
                 <div id="search-results" style="display: none;"></div>
             </header>
@@ -200,7 +190,11 @@
                              data-title="{{ (e.title or '')|lower }}">
                             <a class="library-thumb-link" href="/watch?url={{ e.url|urlencode }}">
                                 <div class="library-thumb-wrap">
-                                    {% if e.has_thumb %}
+                                    {% if e.has_thumb == 2 %}
+                                        <video class="library-thumb-video" src="/t/{{ e.dir_hash }}.mp4"
+                                               poster="/t/{{ e.dir_hash }}" preload="metadata" muted loop playsinline
+                                               onmouseenter="this.play()" onmouseleave="this.pause(); this.currentTime = 0;"></video>
+                                    {% elif e.has_thumb %}
                                         <img loading="lazy" src="/t/{{ e.dir_hash }}" alt=""
                                              onerror="this.remove(); this.parentElement.insertAdjacentHTML('afterbegin', '<div class=&quot;library-thumb-fallback&quot;><i class=&quot;fa-solid fa-film&quot;></i></div>');">
                                     {% else %}
@@ -245,6 +239,18 @@
                 </main>
             </div>
             {% endif %}
+            <details class="url-bar-help">
+                <summary><i class="fa-solid fa-circle-question"></i> How the search box works</summary>
+                <ul>
+                    <li><strong>Filter library</strong> — just type. Cards filter live by title, uploader, or URL.</li>
+                    <li><strong>Play a URL</strong> — paste any URL yt-dlp supports and hit Enter or the play button.</li>
+                    <li><strong>Empty + Play</strong> — reads a URL from your clipboard and plays it.</li>
+                    <li><strong>Search</strong> — <code>&lt;prefix&gt;5:your query</code> asks yt-dlp to search that site for 5 results. Leaving the number off is I'm-feeling-lucky.</li>
+                    <li>
+                        Available search prefixes: {% for p in search_prefixes %}<code>{{ p }}:</code>{% if not loop.last %}, {% endif %}{% endfor %}
+                    </li>
+                </ul>
+            </details>
             <footer class="library-footer">
                 <a href="https://github.com/Matszwe02/ytdlp_web_player" target="_blank" class="footer-link">
                     <span title="{{app_version}}"><b>{{app_title}}</b> {{app_version}}</span>
@@ -255,6 +261,10 @@
                 <span title="{{js_runtime_version[4:]}}">{{js_runtime_version[:4]}} <b>{{js_runtime_version[4:]}}</b></span>
                 <span class="footer-sep">·</span>
                 <span title="{{ffmpeg_version}}">FFmpeg <b>{{ffmpeg_version}}</b></span>
+                <span class="footer-sep">·</span>
+                <a href="/api/docs" class="footer-link" title="REST API reference"><i class="fa-solid fa-book"></i> API docs</a>
+                <span class="footer-sep">·</span>
+                <a href="/api/docs.md" class="footer-link" title="API reference as raw markdown">markdown</a>
             </footer>
         </div>
 
