@@ -255,15 +255,15 @@ Bookmarkable HTML page that renders the search UI and auto-runs the query on loa
 
 ## Saved searches
 
-Persistent list of yt-dlp search queries (e.g. `phcategory:teen`, `ytsearch:cats`) stored server-side in SQLite. Rendered as chips in the sidebar; each chip links to `/search?q=<query>`.
+Persistent list of yt-dlp search queries (`<prefix>:<terms>` — see the prefix table above) stored server-side in SQLite. Rendered as chips in the sidebar; each chip links to `/search?q=<query>`.
 
 ### `GET /saved-searches`
 
 ```json
 {
   "saved_searches": [
-    {"query": "phcategory:teen", "added_at": 1785270000},
-    {"query": "ytsearch:cats",   "added_at": 1785269800}
+    {"query": "<prefix>:cats",    "added_at": 1785270000},
+    {"query": "<prefix>:sunsets", "added_at": 1785269800}
   ]
 }
 ```
@@ -276,7 +276,7 @@ Save one or many queries. Each query is validated against `/search/prefixes` —
 
 **Single:**
 ```
-POST /saved-searches?q=phcategory:teen
+POST /saved-searches?q=<prefix>:cats
 ```
 or `q=` in `application/x-www-form-urlencoded` body.
 
@@ -285,14 +285,14 @@ or `q=` in `application/x-www-form-urlencoded` body.
 POST /saved-searches
 Content-Type: application/x-www-form-urlencoded
 
-queries=phcategory:teen%0Aytsearch:cats%0Aphsearch:funny
+queries=<prefix>:cats%0A<prefix>:sunsets%0A<prefix>:mountains
 ```
 
 Response:
 ```json
 {
-  "added":   ["phcategory:teen", "phsearch:funny"],
-  "skipped": ["ytsearch:cats"],
+  "added":   ["<prefix>:cats", "<prefix>:mountains"],
+  "skipped": ["<prefix>:sunsets"],
   "errors":  [{"query": "not-a-prefix:foo", "reason": "unknown prefix \"not-a-prefix\""}]
 }
 ```
@@ -306,7 +306,7 @@ Status is `200` if anything was added or skipped, `400` if everything failed val
 ### `DELETE /saved-searches?q=<query>`
 
 ```json
-{"removed": true, "query": "phcategory:teen"}
+{"removed": true, "query": "<prefix>:cats"}
 ```
 
 `200` when a row was deleted, `404` if the query wasn't saved.
