@@ -154,6 +154,37 @@
                             </a>
                         </div>
                     </div>
+
+                    <button class="sidebar-collapse" id="saved-searches-toggle" aria-expanded="true">
+                        <i class="fa-solid fa-bookmark"></i> Saved searches
+                        <span class="sidebar-count" id="saved-searches-count">{{ saved_searches|length }}</span>
+                        <i class="fa-solid fa-chevron-up sidebar-chevron"></i>
+                    </button>
+                    <div class="sidebar-body" id="saved-searches-body">
+                        <div class="sidebar-section">
+                            <div class="chips" id="saved-searches-list">
+                                {% for s in saved_searches %}
+                                    <span class="chip-wrap">
+                                        <a class="chip chip-saved-search" href="/search?q={{ s.query|urlencode }}" data-query="{{ s.query }}">
+                                            <i class="fa-solid fa-magnifying-glass" style="opacity:0.6;margin-right:4px;font-size:11px;"></i>{{ s.query }}
+                                        </a>
+                                        <button class="chip-hide-toggle saved-search-remove" data-query="{{ s.query }}" title="Remove saved search">
+                                            <i class="fa-solid fa-xmark"></i>
+                                        </button>
+                                    </span>
+                                {% endfor %}
+                                {% if not saved_searches %}
+                                    <span class="sidebar-empty" style="color: var(--theme-fg); font-size: 12px; opacity: 0.6;">None yet — star a search or paste queries below.</span>
+                                {% endif %}
+                            </div>
+                            <details style="margin-top:8px;">
+                                <summary style="cursor:pointer; color: var(--theme-fg); font-size: 12px; opacity: 0.8;">+ Add (bulk)</summary>
+                                <textarea id="saved-search-input" placeholder="phcategory:teen&#10;ytsearch:cats&#10;phsearch:funny" rows="3" style="width:100%;box-sizing:border-box;margin-top:6px;background:var(--theme-bg);color:var(--theme-fg);border:1px solid #333;border-radius:4px;padding:6px;font-family:ui-monospace,monospace;font-size:12px;resize:vertical;"></textarea>
+                                <button id="saved-search-add-btn" class="library-rebuild" style="margin-top:6px;width:100%;"><i class="fa-solid fa-plus"></i> Save</button>
+                                <div id="saved-search-status" style="margin-top:6px;font-size:11px;color:var(--theme-fg);opacity:0.7;"></div>
+                            </details>
+                        </div>
+                    </div>
                 </aside>
                 <main class="library-main">
                 <div class="library-grid" id="library-grid">
@@ -353,6 +384,8 @@
             function renderYtdlpResults(results, query) {
                 const header = document.createElement('div');
                 header.className = 'search-results-header';
+                const savedSet = new Set(Array.from(document.querySelectorAll('.chip-saved-search')).map(a => a.dataset.query));
+                const isSaved = savedSet.has(query);
                 header.innerHTML = `
                     <h2 class="library-section-title" style="margin-bottom: 0;">
                         Search results
@@ -360,6 +393,9 @@
                         <span style="color: var(--theme-fg); font-size: 13px; margin-left: 8px; font-weight: normal;">${query}</span>
                     </h2>
                     <div class="search-results-actions">
+                        <button id="save-search-btn" class="library-rebuild" data-saved="${isSaved ? '1' : '0'}" title="${isSaved ? 'Remove from saved searches' : 'Save this search'}">
+                            <i class="${isSaved ? 'fa-solid' : 'fa-regular'} fa-star"></i> ${isSaved ? 'Saved' : 'Save'}
+                        </button>
                         <button id="download-all-btn" class="library-rebuild"><i class="fa-solid fa-download"></i> Download all</button>
                         <button id="close-search-btn" class="library-rebuild"><i class="fa-solid fa-xmark"></i> Close</button>
                     </div>
@@ -396,7 +432,118 @@
                     searchResultsEl.innerHTML = '';
                 });
                 document.getElementById('download-all-btn').addEventListener('click', () => downloadAll(results));
+                document.getElementById('save-search-btn').addEventListener('click', (ev) => toggleSaveSearch(query, ev.currentTarget));
             }
+
+            async function toggleSaveSearch(query, btn) {
+                const wasSaved = btn.dataset.saved === '1';
+                btn.disabled = true;
+                try {
+                    if (wasSaved) {
+                        const resp = await fetch('/api/v1/saved-searches?q=' + encodeURIComponent(query), { method: 'DELETE' });
+                        if (!resp.ok && resp.status !== 404) throw new Error('HTTP ' + resp.status);
+                    } else {
+                        const body = new URLSearchParams({ q: query });
+                        const resp = await fetch('/api/v1/saved-searches', { method: 'POST', body });
+                        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                    }
+                    const nowSaved = !wasSaved;
+                    btn.dataset.saved = nowSaved ? '1' : '0';
+                    btn.title = nowSaved ? 'Remove from saved searches' : 'Save this search';
+                    btn.innerHTML = `<i class="${nowSaved ? 'fa-solid' : 'fa-regular'} fa-star"></i> ${nowSaved ? 'Saved' : 'Save'}`;
+                    reloadSavedSearches();
+                } catch (e) {
+                    alert('Save/unsave failed: ' + e.message);
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function reloadSavedSearches() {
+                try {
+                    const resp = await fetch('/api/v1/saved-searches');
+                    if (!resp.ok) return;
+                    const data = await resp.json();
+                    renderSavedSearches(data.saved_searches || []);
+                } catch (e) { /* silent */ }
+            }
+
+            function renderSavedSearches(items) {
+                const list = document.getElementById('saved-searches-list');
+                const count = document.getElementById('saved-searches-count');
+                if (!list) return;
+                count.textContent = items.length;
+                if (!items.length) {
+                    list.innerHTML = '<span class="sidebar-empty" style="color: var(--theme-fg); font-size: 12px; opacity: 0.6;">None yet — star a search or paste queries below.</span>';
+                    return;
+                }
+                list.innerHTML = items.map(s => `
+                    <span class="chip-wrap">
+                        <a class="chip chip-saved-search" href="/search?q=${encodeURIComponent(s.query)}" data-query="${escapeHtml(s.query)}">
+                            <i class="fa-solid fa-magnifying-glass" style="opacity:0.6;margin-right:4px;font-size:11px;"></i>${escapeHtml(s.query)}
+                        </a>
+                        <button class="chip-hide-toggle saved-search-remove" data-query="${escapeHtml(s.query)}" title="Remove saved search">
+                            <i class="fa-solid fa-xmark"></i>
+                        </button>
+                    </span>
+                `).join('');
+                wireSavedSearchButtons();
+            }
+
+            function wireSavedSearchButtons() {
+                document.querySelectorAll('.saved-search-remove').forEach(btn => {
+                    btn.onclick = async (ev) => {
+                        ev.preventDefault();
+                        const q = btn.dataset.query;
+                        try {
+                            const resp = await fetch('/api/v1/saved-searches?q=' + encodeURIComponent(q), { method: 'DELETE' });
+                            if (!resp.ok && resp.status !== 404) throw new Error('HTTP ' + resp.status);
+                            reloadSavedSearches();
+                            // Also update star button state if currently viewing this search
+                            const starBtn = document.getElementById('save-search-btn');
+                            const urlInputEl = document.getElementById('url');
+                            if (starBtn && urlInputEl && urlInputEl.value.trim() === q) {
+                                starBtn.dataset.saved = '0';
+                                starBtn.title = 'Save this search';
+                                starBtn.innerHTML = '<i class="fa-regular fa-star"></i> Save';
+                            }
+                        } catch (e) {
+                            alert('Remove failed: ' + e.message);
+                        }
+                    };
+                });
+            }
+
+            wireSavedSearchButtons();
+
+            (function () {
+                const addBtn = document.getElementById('saved-search-add-btn');
+                const input = document.getElementById('saved-search-input');
+                const statusEl = document.getElementById('saved-search-status');
+                if (!addBtn || !input) return;
+                addBtn.addEventListener('click', async () => {
+                    const raw = input.value.trim();
+                    if (!raw) { statusEl.textContent = 'nothing to save'; return; }
+                    addBtn.disabled = true;
+                    statusEl.textContent = 'Saving...';
+                    try {
+                        const body = new URLSearchParams({ queries: raw });
+                        const resp = await fetch('/api/v1/saved-searches', { method: 'POST', body });
+                        const data = await resp.json();
+                        const parts = [];
+                        if (data.added && data.added.length) parts.push(`added ${data.added.length}`);
+                        if (data.skipped && data.skipped.length) parts.push(`already had ${data.skipped.length}`);
+                        if (data.errors && data.errors.length) parts.push(`${data.errors.length} rejected: ${data.errors.map(e => e.reason).join(', ')}`);
+                        statusEl.textContent = parts.join(' · ') || 'nothing to save';
+                        if (data.added && data.added.length) input.value = '';
+                        reloadSavedSearches();
+                    } catch (e) {
+                        statusEl.textContent = 'error: ' + e.message;
+                    } finally {
+                        addBtn.disabled = false;
+                    }
+                });
+            })();
 
             function escapeHtml(s) {
                 return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -592,6 +739,24 @@
                     sidebarBody.classList.toggle('collapsed', nowCollapsed);
                     sidebarToggle.setAttribute('aria-expanded', String(!nowCollapsed));
                     try { localStorage.setItem('sidebar_collapsed', nowCollapsed ? '1' : '0'); } catch (e) {}
+                });
+            }
+
+            const savedSearchesToggle = document.getElementById('saved-searches-toggle');
+            const savedSearchesBody = document.getElementById('saved-searches-body');
+            if (savedSearchesToggle && savedSearchesBody) {
+                const collapsed = (() => {
+                    try { return localStorage.getItem('saved_searches_collapsed') === '1'; } catch (e) { return false; }
+                })();
+                if (collapsed) {
+                    savedSearchesBody.classList.add('collapsed');
+                    savedSearchesToggle.setAttribute('aria-expanded', 'false');
+                }
+                savedSearchesToggle.addEventListener('click', () => {
+                    const nowCollapsed = !savedSearchesBody.classList.contains('collapsed');
+                    savedSearchesBody.classList.toggle('collapsed', nowCollapsed);
+                    savedSearchesToggle.setAttribute('aria-expanded', String(!nowCollapsed));
+                    try { localStorage.setItem('saved_searches_collapsed', nowCollapsed ? '1' : '0'); } catch (e) {}
                 });
             }
 

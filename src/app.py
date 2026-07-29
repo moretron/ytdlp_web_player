@@ -86,12 +86,14 @@ def _render_home():
     all_categories = library_db.list_categories(include_hidden=show_hidden)
     all_sites = library_db.list_sites(include_hidden=show_hidden)
     hidden_sites = library_db.list_hidden_sites()
+    saved_searches = library_db.list_saved_searches()
     print('Stopped serving home/library')
     return render_template('index.html',
         entries=entries, grouped=grouped, total=len(entries),
         all_tags=all_tags, all_categories=all_categories, all_sites=all_sites,
         hidden_sites=hidden_sites, show_hidden=show_hidden,
         search_prefixes=YTDLP_SEARCH_PREFIXES,
+        saved_searches=saved_searches,
         ydl_version=ydl_version, app_version=app_version,
         js_runtime_version=js_runtime_version, ffmpeg_version=ffmpeg_version,
         app_title=app_title, theme_color=theme_color, amoled_bg=amoled_bg)
@@ -423,6 +425,41 @@ def serve_thumbnail_by_hash(dir_hash):
     return jsonify({"error": "no thumb or sprite"}), 404
 
 
+def _thumb_proxy_error(msg, status, url=None, /, **extra):
+    """Return a JSON error for /thumb-proxy and print the same detail.
+
+    Leading params are positional-only so callers can pass detail keys that
+    shadow them (``status=502`` is a useful field name for the upstream code).
+
+    Proxied thumbs are consumed by <img src>, so nothing ever renders this
+    body -- the printed line is usually the only place a human sees why a
+    thumbnail came up blank.
+    """
+    payload = {"error": msg}
+    if url:
+        payload["url"] = url
+    payload.update(extra)
+    detail = ' '.join(f'{k}={v}' for k, v in extra.items())
+    print(f'thumb-proxy: {msg}'
+          + (f' | {detail}' if detail else '')
+          + (f' | url={url}' if url else ''))
+    return jsonify(payload), status
+
+
+def _thumb_body_snippet(r):
+    """First 2 KB of an upstream error body, de-tagged and whitespace-collapsed.
+    CDNs put the real reason (expired token, hotlink block, geo deny) in there,
+    so it is worth surfacing next to a bare status code."""
+    try:
+        chunk = next(r.iter_content(2048), b'') or b''
+    except Exception:
+        return ''
+    text = chunk.decode('utf-8', 'replace') if isinstance(chunk, bytes) else str(chunk)
+    text = _re.sub(r'(?is)<(script|style).*?</\1>', ' ', text)
+    text = _re.sub(r'<[^>]+>', ' ', text)
+    return _re.sub(r'\s+', ' ', text).strip()[:200]
+
+
 @app.route('/thumb-proxy')
 def serve_thumb_proxy():
     """Fetch an external CDN thumbnail through the server so the client never
@@ -435,25 +472,32 @@ def serve_thumb_proxy():
 
     raw = (request.args.get('url') or '').strip()
     if not raw:
-        return jsonify({"error": "url parameter required"}), 400
+        return _thumb_proxy_error('url parameter required', 400)
     try:
         parsed = urlparse(raw)
-    except Exception:
-        return jsonify({"error": "invalid url"}), 400
+    except Exception as e:
+        return _thumb_proxy_error('invalid url', 400, raw,
+                                  cause=f'{type(e).__name__}: {e}')
     if parsed.scheme not in ('http', 'https') or not parsed.hostname:
-        return jsonify({"error": "unsupported url"}), 400
+        return _thumb_proxy_error(
+            f'unsupported url (scheme={parsed.scheme or "none"}, '
+            f'host={parsed.hostname or "none"})', 400, raw)
 
     # SSRF: refuse private/loopback/link-local IPs.
+    host = parsed.hostname
     try:
-        ip = ipaddress.ip_address(socket.gethostbyname(parsed.hostname))
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            return jsonify({"error": "blocked host"}), 400
-    except Exception:
-        return jsonify({"error": "host lookup failed"}), 400
+        addr = socket.gethostbyname(host)
+        ip = ipaddress.ip_address(addr)
+    except Exception as e:
+        return _thumb_proxy_error(f'host lookup failed for {host}', 400, raw,
+                                  host=host, cause=f'{type(e).__name__}: {e}')
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+        return _thumb_proxy_error(f'blocked host {host} (resolves to private/reserved {addr})',
+                                  400, raw, host=host, ip=addr)
 
     allow_any = os.getenv('THUMB_PROXY_ALLOW_ANY', 'false').lower() in ('1', 'true', 'yes')
     if not allow_any:
-        host = parsed.hostname.lower()
+        host_l = host.lower()
         allowed_suffixes = (
             '.phncdn.com', '.ytimg.com', '.googleusercontent.com',
             '.googlevideo.com', '.twimg.com', '.cdninstagram.com',
@@ -461,20 +505,41 @@ def serve_thumb_proxy():
             '.redditmedia.com', '.redd.it', '.imgur.com',
             '.vimeocdn.com', '.dmcdn.net',
         )
-        if not any(host == s[1:] or host.endswith(s) for s in allowed_suffixes):
-            return jsonify({"error": "host not allowed", "host": host}), 403
+        if not any(host_l == s[1:] or host_l.endswith(s) for s in allowed_suffixes):
+            return _thumb_proxy_error(
+                f'host not allowed: {host_l} (not in the CDN whitelist; '
+                f'set THUMB_PROXY_ALLOW_ANY=true to permit any host)',
+                403, raw, host=host_l, allowed=' '.join(allowed_suffixes))
 
     try:
         r = _requests.get(raw, timeout=15, stream=True, allow_redirects=True,
                           headers={'User-Agent': 'Mozilla/5.0'})
     except Exception as e:
-        return jsonify({"error": f"upstream fetch failed: {e}"}), 502
+        return _thumb_proxy_error(f'upstream fetch failed for {host}: '
+                                  f'{type(e).__name__}: {e}', 502, raw, host=host)
     if r.status_code >= 400:
-        return jsonify({"error": f"upstream returned {r.status_code}"}), 502
+        why = _thumb_body_snippet(r)
+        extra = {"host": host, "status": r.status_code}
+        if r.reason:
+            extra["reason"] = r.reason
+        if r.url != raw:
+            extra["final_url"] = r.url
+        if why:
+            extra["upstream_body"] = why
+        r.close()
+        return _thumb_proxy_error(
+            f'upstream returned {r.status_code} {r.reason or ""}'.strip()
+            + f' from {host}' + (f' -- {why}' if why else ''),
+            502, raw, **extra)
 
     ctype = (r.headers.get('Content-Type') or 'image/jpeg').split(';')[0].strip()
     if not ctype.startswith('image/'):
-        return jsonify({"error": "not an image"}), 415
+        why = _thumb_body_snippet(r)
+        r.close()
+        return _thumb_proxy_error(
+            f'not an image: {host} sent {ctype or "no content-type"}'
+            + (f' -- {why}' if why else ''),
+            415, raw, host=host, content_type=ctype, status=r.status_code)
 
     # 8 MB cap to avoid memory abuse; thumbnails are usually <200 KB.
     max_bytes = 8 * 1024 * 1024
@@ -482,7 +547,10 @@ def serve_thumb_proxy():
     for chunk in r.iter_content(64 * 1024):
         body.extend(chunk)
         if len(body) > max_bytes:
-            return jsonify({"error": "response too large"}), 502
+            r.close()
+            return _thumb_proxy_error(
+                f'response too large: {host} sent over {max_bytes // (1024 * 1024)} MB',
+                502, raw, host=host, content_type=ctype, limit_bytes=max_bytes)
     resp = Response(bytes(body), mimetype=ctype)
     resp.headers['Cache-Control'] = 'public, max-age=3600, immutable'
     return resp

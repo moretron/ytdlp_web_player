@@ -163,6 +163,47 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_video_tags_tag ON video_tags(tag_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_video_categories_cat ON video_categories(category_id)")
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS saved_searches (
+                query TEXT PRIMARY KEY,
+                added_at INTEGER NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_searches_added_at ON saved_searches(added_at)")
+
+
+def list_saved_searches():
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT query, added_at FROM saved_searches ORDER BY added_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_saved_search(query):
+    """Insert or refresh a single saved search. Returns True if newly added."""
+    import time as _time
+    q = (query or '').strip()
+    if not q:
+        return False
+    with _connect() as conn:
+        existed = conn.execute("SELECT 1 FROM saved_searches WHERE query = ?", (q,)).fetchone()
+        conn.execute(
+            "INSERT INTO saved_searches (query, added_at) VALUES (?, ?) "
+            "ON CONFLICT(query) DO UPDATE SET added_at = excluded.added_at",
+            (q, int(_time.time())),
+        )
+    return not existed
+
+
+def remove_saved_search(query):
+    q = (query or '').strip()
+    if not q:
+        return False
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM saved_searches WHERE query = ?", (q,))
+    return cur.rowcount > 0
+
 
 def _clean_labels(items):
     if not items: return []

@@ -492,6 +492,71 @@ def api_search_prefixes():
     return jsonify({"prefixes": YTDLP_SEARCH_PREFIXES}), 200
 
 
+# ---------- Saved searches ----------
+
+_SEARCH_QUERY_RE = re.compile(r'^([a-z][a-z0-9]*):', re.IGNORECASE)
+
+
+def _validate_search_query(q):
+    """Return (cleaned_query, error_or_none). A valid query starts with a known
+    yt-dlp search prefix."""
+    from app import YTDLP_SEARCH_PREFIXES
+    q = (q or '').strip()
+    if not q:
+        return None, 'empty query'
+    m = _SEARCH_QUERY_RE.match(q)
+    if not m:
+        return None, 'missing prefix'
+    if YTDLP_SEARCH_PREFIXES and m.group(1).lower() not in YTDLP_SEARCH_PREFIXES:
+        return None, f'unknown prefix "{m.group(1)}"'
+    return q, None
+
+
+@bp.route('/saved-searches', methods=['GET', 'OPTIONS'])
+def api_saved_searches_list():
+    return jsonify({"saved_searches": library_db.list_saved_searches()}), 200
+
+
+@bp.route('/saved-searches', methods=['POST', 'OPTIONS'])
+def api_saved_searches_add():
+    """Save one or many queries.
+
+    Single: `POST /saved-searches?q=<query>` or `q` in form body.
+    Bulk:   `POST /saved-searches` with `queries` in form body containing
+            newline- or comma-separated queries (order-preserving).
+    Response: `{added: [...], skipped: [...], errors: [{query, reason}]}`."""
+    raw_bulk = (request.form.get('queries') or request.values.get('queries') or '').strip()
+    if raw_bulk:
+        candidates = [s.strip() for s in re.split(r'[\n,]', raw_bulk) if s.strip()]
+    else:
+        one = (request.args.get('q') or request.form.get('q') or '').strip()
+        candidates = [one] if one else []
+    if not candidates:
+        return _err("q or queries required")
+
+    added, skipped, errors = [], [], []
+    for cand in candidates:
+        cleaned, err = _validate_search_query(cand)
+        if err:
+            errors.append({"query": cand, "reason": err})
+            continue
+        if library_db.add_saved_search(cleaned):
+            added.append(cleaned)
+        else:
+            skipped.append(cleaned)
+    status = 200 if (added or skipped) else 400
+    return jsonify({"added": added, "skipped": skipped, "errors": errors}), status
+
+
+@bp.route('/saved-searches', methods=['DELETE', 'OPTIONS'])
+def api_saved_searches_remove():
+    q = (request.args.get('q') or request.form.get('q') or '').strip()
+    if not q:
+        return _err("q required")
+    removed = library_db.remove_saved_search(q)
+    return jsonify({"removed": removed, "query": q}), (200 if removed else 404)
+
+
 # ---------- Logs ----------
 
 @bp.route('/logs', methods=['GET', 'OPTIONS'])

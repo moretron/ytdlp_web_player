@@ -253,6 +253,66 @@ Bookmarkable HTML page that renders the search UI and auto-runs the query on loa
 
 ---
 
+## Saved searches
+
+Persistent list of yt-dlp search queries (e.g. `phcategory:teen`, `ytsearch:cats`) stored server-side in SQLite. Rendered as chips in the sidebar; each chip links to `/search?q=<query>`.
+
+### `GET /saved-searches`
+
+```json
+{
+  "saved_searches": [
+    {"query": "phcategory:teen", "added_at": 1785270000},
+    {"query": "ytsearch:cats",   "added_at": 1785269800}
+  ]
+}
+```
+
+Ordered by `added_at` DESC (newest first).
+
+### `POST /saved-searches`
+
+Save one or many queries. Each query is validated against `/search/prefixes` — only known-prefix queries are accepted.
+
+**Single:**
+```
+POST /saved-searches?q=phcategory:teen
+```
+or `q=` in `application/x-www-form-urlencoded` body.
+
+**Bulk:** send `queries` in the form body, newline- or comma-separated:
+```
+POST /saved-searches
+Content-Type: application/x-www-form-urlencoded
+
+queries=phcategory:teen%0Aytsearch:cats%0Aphsearch:funny
+```
+
+Response:
+```json
+{
+  "added":   ["phcategory:teen", "phsearch:funny"],
+  "skipped": ["ytsearch:cats"],
+  "errors":  [{"query": "not-a-prefix:foo", "reason": "unknown prefix \"not-a-prefix\""}]
+}
+```
+
+- `added`: newly inserted.
+- `skipped`: already present; `added_at` was bumped.
+- `errors`: invalid (missing prefix, or prefix not in `/search/prefixes`).
+
+Status is `200` if anything was added or skipped, `400` if everything failed validation.
+
+### `DELETE /saved-searches?q=<query>`
+
+```json
+{"removed": true, "query": "phcategory:teen"}
+```
+
+`200` when a row was deleted, `404` if the query wasn't saved.
+
+---
+
 ## Logs
 
 ### `GET /logs?since=<bytes>`
