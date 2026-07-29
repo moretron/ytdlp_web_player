@@ -436,6 +436,73 @@ def _inject_default_count(q, counted_prefixes, default_n):
     return f'{m.group(1)}{default_n}:{q[m.end():]}'
 
 
+def _split_search_query(q, prefixes):
+    """Split `<prefix><count>:<terms>` into its three parts, matching against
+    the known prefix list rather than a generic regex — a bare pattern can't
+    tell `ytsearch5:` (key + count) from `ytsearchdate:` (a longer key), and
+    picks the wrong split for both. Longest match wins.
+
+    Returns (prefix_as_written, count, terms), where count is '', 'all' or
+    digits, or None when the query doesn't start with a known prefix."""
+    ql = q.lower()
+    best = None
+    for p in prefixes:
+        if not ql.startswith(p):
+            continue
+        m = re.match(r'(all|[0-9]*):([\s\S]*)', q[len(p):], re.IGNORECASE)
+        if m and (best is None or len(p) > len(best[0])):
+            best = (q[:len(p)], m.group(1).lower(), m.group(2))
+    return best
+
+
+def resolve_search_paging(q, args, prefixes, counted_prefixes, default_n):
+    """Work out which query to hand yt-dlp and which slice of results to ask
+    for, from `page` / `per_page` request args.
+
+    The count baked into a query (`<prefix>24:cats`) acts as the page size,
+    and the prefix is rewritten to `all` so a window can reach past it —
+    `_get_n_results` caps the generator at the count, so leaving `24` in place
+    would make page 2 come back empty. Asking for everything (`<prefix>all:`
+    with no explicit paging) still skips the window entirely.
+
+    Returns (query, start, end, page, per_page); start/end are 1-based
+    inclusive, and are None for an unbounded fetch."""
+    parts = _split_search_query(q, prefixes or [])
+    prefix, count, terms = parts if parts else ('', '', '')
+
+    def _int_arg(name, fallback):
+        try:
+            return int(str(args.get(name)).strip())
+        except (TypeError, ValueError):
+            return fallback
+
+    wants_page = args.get('page') is not None
+    page = max(1, _int_arg('page', 1))
+    per_page = _int_arg('per_page', 0)
+    if per_page > 0:
+        per_page = min(per_page, 200)
+    elif count.isdigit() and int(count) > 0:
+        per_page = int(count)
+    elif count == 'all' or str(default_n).lower() == 'all':
+        # "Everything" means no window — unless the caller explicitly asked
+        # for a page, which needs a size even when nothing else supplies one.
+        per_page = 24 if wants_page else 0
+    else:
+        per_page = max(1, int(default_n))
+
+    # Rewrite the count only for prefixes that take one; on anything else
+    # (`ytuser:`, a plain playlist URL) the window still applies, because
+    # playlist_items slices any playlist-shaped result.
+    query = q
+    if parts and prefix.lower() in counted_prefixes:
+        query = f'{prefix}{"all" if per_page else count}:{terms}'
+
+    if not per_page:
+        return query, None, None, 1, None
+    start = (page - 1) * per_page + 1
+    return query, start, start + per_page - 1, page, per_page
+
+
 @bp.route('/search', methods=['GET', 'OPTIONS'])
 def api_search():
     # Imported lazily to avoid circular import at module load.
@@ -450,11 +517,17 @@ def api_search():
                 400,
                 known_prefixes=YTDLP_SEARCH_PREFIXES,
             )
-    q = _inject_default_count(q, COUNTED_SEARCH_PREFIXES, YTDLP_SEARCH_DEFAULT_N)
+    query, start, end, page, per_page = resolve_search_paging(
+        q, request.args, YTDLP_SEARCH_PREFIXES, COUNTED_SEARCH_PREFIXES, YTDLP_SEARCH_DEFAULT_N)
     try:
-        entries = flat_search(q)
+        # One item past the window tells us whether a next page exists without
+        # a second round-trip; it's trimmed off before the results go out.
+        entries = flat_search(query, start, end + 1 if end else None)
     except Exception as e:
         return _err(str(e), 500)
+    has_more = bool(per_page) and len(entries) > per_page
+    if per_page:
+        entries = entries[:per_page]
     results = []
     for e in entries:
         u = e.get('webpage_url') or e.get('url') or e.get('original_url') or ''
@@ -483,7 +556,13 @@ def api_search():
             # subsequent requests can use this id.
             "id": library_db.dir_hash(u),
         })
-    return jsonify({"count": len(results), "results": results}), 200
+    return jsonify({
+        "count": len(results),
+        "page": page,
+        "per_page": per_page,
+        "has_more": has_more,
+        "results": results,
+    }), 200
 
 
 @bp.route('/search/prefixes', methods=['GET', 'OPTIONS'])

@@ -167,7 +167,7 @@ def library_site_unhide():
 
 @app.route('/ytsearch')
 def ytsearch_route():
-    from api import _inject_default_count  # shared with /api/v1/search
+    from api import resolve_search_paging  # shared with /api/v1/search
     q = request.args.get('q', '').strip()
     if not q: return jsonify({"error": "q parameter required"}), 400
     if YTDLP_SEARCH_PREFIXES:
@@ -177,11 +177,16 @@ def ytsearch_route():
                 "error": "Unknown search prefix. Query must start with one of: " + ", ".join(f"{p}:" for p in YTDLP_SEARCH_PREFIXES),
                 "known_prefixes": YTDLP_SEARCH_PREFIXES,
             }), 400
-    q = _inject_default_count(q, COUNTED_SEARCH_PREFIXES, YTDLP_SEARCH_DEFAULT_N)
+    query, start, end, page, per_page = resolve_search_paging(
+        q, request.args, YTDLP_SEARCH_PREFIXES, COUNTED_SEARCH_PREFIXES, YTDLP_SEARCH_DEFAULT_N)
     try:
-        entries = flat_search(q)
+        # One past the window, so `has_more` costs nothing extra.
+        entries = flat_search(query, start, end + 1 if end else None)
     except Exception as e:
         return pprint_exc(e)
+    has_more = bool(per_page) and len(entries) > per_page
+    if per_page:
+        entries = entries[:per_page]
     results = []
     for e in entries:
         url = e.get('webpage_url') or e.get('url') or e.get('original_url') or ''
@@ -206,7 +211,8 @@ def ytsearch_route():
             'view_count': e.get('view_count'),
             'id': e.get('id') or '',
         })
-    return jsonify({'results': results, 'count': len(results)}), 200
+    return jsonify({'results': results, 'count': len(results),
+                    'page': page, 'per_page': per_page, 'has_more': has_more}), 200
 
 
 @app.route('/search')

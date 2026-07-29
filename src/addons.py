@@ -1372,31 +1372,40 @@ _SEARCH_CACHE_TTL = max(0, int(os.getenv('SEARCH_CACHE_TTL', '3600')))
 _SEARCH_CACHE_MAX = 256
 
 
-def flat_search(query):
+def flat_search(query, start=None, end=None):
     """Run a yt-dlp search query with extract_flat for speed. Preserves clean URLs
     so results map to the same library entries as direct URL visits.
 
+    `start`/`end` are 1-based inclusive item numbers passed to yt-dlp's
+    `playlist_items`, which slices the extractor's lazy result generator. That
+    is what makes paging work for every search prefix — including the ones
+    whose site exposes no page parameter — and it stops fetching site pages
+    once `end` is reached instead of walking the whole result set.
+
     Results are cached in-process for SEARCH_CACHE_TTL seconds (default 3600,
-    set 0 to disable). Cache key is the post-rewrite query, so `phcategory:teen`
-    and `phcategory:teen` share a cache entry, and `phcategory10:teen` is
-    a separate one."""
+    set 0 to disable). Cache key is the post-rewrite query plus the window, so
+    each page is cached separately."""
     now = time.time()
+    window = f'{start or 1}:{end or ""}' if (start or end) else None
+    cache_key = f'{query}\x00{window}' if window else query
     if _SEARCH_CACHE_TTL:
-        hit = _SEARCH_CACHE.get(query)
+        hit = _SEARCH_CACHE.get(cache_key)
         if hit and hit[0] > now:
-            print(f'Flat search cache hit for {query}')
+            print(f'Flat search cache hit for {cache_key!r}')
             return hit[1]
 
-    print(f'Flat search for {query}')
+    print(f'Flat search for {query}' + (f' items {window}' if window else ''))
     ydl_opts = {'quiet': True, 'skip_download': True, 'extract_flat': 'in_playlist', 'default_search': 'auto'}
     ydl_opts.update(ydl_global_opts)
     ydl_opts.pop('playlistend', None)
     ydl_opts.pop('noplaylist', None)
+    if window:
+        ydl_opts['playlist_items'] = window
     info = YTDLP.get_info(query, ydl_opts)
     entries = info.get('entries') or []
 
     if _SEARCH_CACHE_TTL:
-        _SEARCH_CACHE[query] = (now + _SEARCH_CACHE_TTL, entries)
+        _SEARCH_CACHE[cache_key] = (now + _SEARCH_CACHE_TTL, entries)
         # Evict expired, then cap to _SEARCH_CACHE_MAX (drop oldest).
         for k in [k for k, (exp, _) in _SEARCH_CACHE.items() if exp <= now]:
             _SEARCH_CACHE.pop(k, None)

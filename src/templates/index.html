@@ -370,24 +370,66 @@
                 return n + ' views';
             }
 
+            // Everything loaded so far for the current query. Pages are fetched
+            // one at a time and appended, so "Download all" covers every result
+            // on screen rather than only the last page.
+            let searchState = { query: '', page: 1, results: [], hasMore: false };
+
+            async function fetchSearchPage(query, page) {
+                const resp = await fetch('/ytsearch?q=' + encodeURIComponent(query) + '&page=' + page);
+                if (!resp.ok) throw new Error(await resp.text());
+                return resp.json();
+            }
+
             async function runYtdlpSearch(query) {
                 searchResultsEl.style.display = '';
                 searchResultsEl.innerHTML = '<p class="library-empty" style="margin: 24px 0;">Searching&hellip;</p>';
                 try {
-                    const resp = await fetch('/ytsearch?q=' + encodeURIComponent(query));
-                    if (!resp.ok) throw new Error(await resp.text());
-                    const data = await resp.json();
+                    const data = await fetchSearchPage(query, 1);
                     if (!data.results || data.results.length === 0) {
                         searchResultsEl.innerHTML = '<p class="library-empty" style="margin: 24px 0;">No results.</p>';
                         return;
                     }
-                    if (data.results.length === 1) {
+                    if (data.results.length === 1 && !data.has_more) {
                         window.location.href = '/watch?url=' + encodeURIComponent(data.results[0].url);
                         return;
                     }
-                    renderYtdlpResults(data.results, query);
+                    searchState = { query, page: 1, results: data.results.slice(), hasMore: !!data.has_more };
+                    renderYtdlpResults(searchState.results, query);
                 } catch (e) {
                     searchResultsEl.innerHTML = '<p class="library-empty" style="margin: 24px 0; color: #c66;">Search failed: ' + e.message + '</p>';
+                }
+            }
+
+            async function loadMoreResults(btn) {
+                const nextPage = searchState.page + 1;
+                const original = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Loading page ' + nextPage + '&hellip;';
+                try {
+                    const data = await fetchSearchPage(searchState.query, nextPage);
+                    // Each page is a fresh extraction, and some sites reorder
+                    // their results between requests, so a later page can
+                    // repeat an item we already have. Drop those.
+                    const seen = new Set(searchState.results.map(r => r.url));
+                    const fresh = (data.results || []).filter(r => !seen.has(r.url));
+                    searchState.page = nextPage;
+                    searchState.hasMore = !!data.has_more && (data.results || []).length > 0;
+                    searchState.results.push(...fresh);
+                    const grid = searchResultsEl.querySelector('.library-grid');
+                    fresh.forEach(r => grid.appendChild(buildResultCard(r)));
+                    const countEl = searchResultsEl.querySelector('.library-section-count');
+                    if (countEl) countEl.textContent = searchState.results.length;
+                    if (searchState.hasMore) {
+                        btn.disabled = false;
+                        btn.innerHTML = original;
+                    } else {
+                        btn.remove();
+                    }
+                } catch (e) {
+                    btn.disabled = false;
+                    btn.innerHTML = original;
+                    alert('Could not load page ' + nextPage + ': ' + e.message);
                 }
             }
 
@@ -412,37 +454,48 @@
                 `;
                 const grid = document.createElement('div');
                 grid.className = 'library-grid';
-                results.forEach(r => {
-                    const card = document.createElement('div');
-                    card.className = 'library-card';
-                    card.dataset.url = r.url;
-                    card.innerHTML = `
-                        <a class="library-thumb-link" href="/watch?url=${encodeURIComponent(r.url)}">
-                            <div class="library-thumb-wrap">
-                                ${r.thumbnail
-                                    ? `<img loading="lazy" src="${r.thumbnail}" alt="" referrerpolicy="no-referrer">`
-                                    : `<div class="library-thumb-fallback"><i class="fa-solid fa-film"></i></div>`}
-                                ${r.duration ? `<span class="library-duration">${fmtDuration(r.duration)}</span>` : ''}
-                            </div>
-                        </a>
-                        <div class="library-meta">
-                            <a class="library-title" href="/watch?url=${encodeURIComponent(r.url)}" title="">${escapeHtml(r.title || r.url)}</a>
-                            ${r.uploader ? `<div class="library-uploader">${escapeHtml(r.uploader)}</div>` : ''}
-                            ${r.view_count ? `<div class="library-uploader">${fmtCount(r.view_count)}</div>` : ''}
-                        </div>
-                    `;
-                    grid.appendChild(card);
-                });
+                results.forEach(r => grid.appendChild(buildResultCard(r)));
                 searchResultsEl.innerHTML = '';
                 searchResultsEl.appendChild(header);
                 searchResultsEl.appendChild(grid);
+
+                if (searchState.hasMore) {
+                    const more = document.createElement('div');
+                    more.className = 'search-load-more';
+                    more.innerHTML = '<button id="load-more-btn" class="library-rebuild"><i class="fa-solid fa-angles-down"></i> Load more</button>';
+                    searchResultsEl.appendChild(more);
+                    document.getElementById('load-more-btn').addEventListener('click', (ev) => loadMoreResults(ev.currentTarget));
+                }
 
                 document.getElementById('close-search-btn').addEventListener('click', () => {
                     searchResultsEl.style.display = 'none';
                     searchResultsEl.innerHTML = '';
                 });
-                document.getElementById('download-all-btn').addEventListener('click', () => downloadAll(results));
+                // Reads searchState so it picks up pages loaded after this render.
+                document.getElementById('download-all-btn').addEventListener('click', () => downloadAll(searchState.results));
                 document.getElementById('save-search-btn').addEventListener('click', (ev) => toggleSaveSearch(query, ev.currentTarget));
+            }
+
+            function buildResultCard(r) {
+                const card = document.createElement('div');
+                card.className = 'library-card';
+                card.dataset.url = r.url;
+                card.innerHTML = `
+                    <a class="library-thumb-link" href="/watch?url=${encodeURIComponent(r.url)}">
+                        <div class="library-thumb-wrap">
+                            ${r.thumbnail
+                                ? `<img loading="lazy" src="${r.thumbnail}" alt="" referrerpolicy="no-referrer">`
+                                : `<div class="library-thumb-fallback"><i class="fa-solid fa-film"></i></div>`}
+                            ${r.duration ? `<span class="library-duration">${fmtDuration(r.duration)}</span>` : ''}
+                        </div>
+                    </a>
+                    <div class="library-meta">
+                        <a class="library-title" href="/watch?url=${encodeURIComponent(r.url)}" title="">${escapeHtml(r.title || r.url)}</a>
+                        ${r.uploader ? `<div class="library-uploader">${escapeHtml(r.uploader)}</div>` : ''}
+                        ${r.view_count ? `<div class="library-uploader">${fmtCount(r.view_count)}</div>` : ''}
+                    </div>
+                `;
+                return card;
             }
 
             async function toggleSaveSearch(query, btn) {

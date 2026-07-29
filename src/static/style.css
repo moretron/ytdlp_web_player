@@ -1265,6 +1265,13 @@ body.library-body
     background-color: #2a2a2a;
 }
 
+.search-load-more
+{
+    display: flex;
+    justify-content: center;
+    margin: 20px 0 8px;
+}
+
 .library-footer
 {
     margin-top: 16px;

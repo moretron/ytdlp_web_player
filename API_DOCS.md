@@ -197,13 +197,26 @@ The `q` must start with a known yt-dlp search prefix, in the form `<prefix>[coun
 
 **Fork-only prefixes.** The bundled yt-dlp fork adds site-specific `…search` and `…category` prefixes on top of upstream's, each with a short alias. They appear in `/search/prefixes` like any other prefix; a `…category` prefix resolves its argument as a slug, probing `/categories/<slug>` then `/<slug>` on the target site.
 
-**Caching.** Results are cached in-process for `SEARCH_CACHE_TTL` seconds (env, default `3600`; `0` disables). Cache key is the post-rewrite query, so `<prefix>:cats` and `<prefix>24:cats` share an entry (both rewrite to the same string).
+**Pagination.** `&page=<n>` (1-based) and `&per_page=<n>` (default: the count in the query, else `YTDLP_SEARCH_DEFAULT_N`; max `200`) walk deeper into the result set:
+
+```
+GET /search?q=<prefix>:cats&page=3&per_page=24
+```
+
+The window is handed to yt-dlp as `playlist_items`, which slices the extractor's lazy result generator — so it works for **every** search prefix, not only sites whose URLs take a page number, and it stops fetching site pages once the window is filled. The count in the query is rewritten to `all` when paging, since `_get_n_results` would otherwise cap the generator below the window and hand back an empty page 2.
+
+The response carries `page`, `per_page` and `has_more`. `has_more` is exact, not a guess: the server asks for one item past the window and trims it. Asking for everything (`<prefix>all:cats` with no `page`/`per_page`) skips paging entirely and returns `per_page: null`, `has_more: false`.
+
+**Caching.** Results are cached in-process for `SEARCH_CACHE_TTL` seconds (env, default `3600`; `0` disables). Cache key is the post-rewrite query **plus the page window**, so each page is cached separately.
 
 **Thumbnails are proxied.** The `thumbnail` field in each result is a relative URL like `/thumb-proxy?url=<encoded-cdn-url>`, so the client never connects to the CDN directly. See [`/thumb-proxy`](#get-thumb-proxyurlcdn-url) below.
 
 ```json
 {
   "count": 24,
+  "page": 1,
+  "per_page": 24,
+  "has_more": true,
   "results": [
     {
       "title": "...",
