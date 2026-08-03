@@ -195,7 +195,9 @@ The `q` must start with a known yt-dlp search prefix, in the form `<prefix>[coun
 
 **Default result count.** If you omit the count (e.g. `<prefix>:cats` instead of `<prefix>24:cats`), the server injects `YTDLP_SEARCH_DEFAULT_N` (env, default `24`; set to `all` for unlimited). Explicit counts and `<prefix>all:` queries are preserved. The rewrite only applies to `SearchInfoExtractor` prefixes — URL-shortcut prefixes (user/channel/category jumps on non-search extractors) are unaffected.
 
-**Fork-only prefixes.** The bundled yt-dlp fork adds site-specific `…search` and `…category` prefixes on top of upstream's, each with a short alias. They appear in `/search/prefixes` like any other prefix; a `…category` prefix resolves its argument as a slug, probing `/categories/<slug>` then `/<slug>` on the target site.
+**Fork-only prefixes.** The bundled yt-dlp fork adds site-specific `…search` and `…category` prefixes on top of upstream's, each with a short alias. They appear in `/search/prefixes` like any other prefix.
+
+A `…category` prefix takes either a name (`<prefix>:big-ass`) or the site's own numeric category id (`<prefix>:27`). Names are matched against a slug→id map scraped from the site's category page and cached on disk, so `<prefix>:lesbian` and `<prefix>:27` are the same query. Names the site doesn't list fall back to probing slug paths directly.
 
 **Pagination.** `&page=<n>` (1-based) and `&per_page=<n>` (default: the count in the query, else `YTDLP_SEARCH_DEFAULT_N`; max `200`) walk deeper into the result set:
 
