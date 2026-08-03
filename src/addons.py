@@ -117,9 +117,22 @@ class Processes:
     def get():
         proc = {}
         for i in os.listdir(data_path):
-            if not os.path.isdir(os.path.join(data_path, i)):
-                with open(os.path.join(data_path, i), 'r') as f:
+            # PID tracker files only. Upstream reads every non-directory entry
+            # here, which assumes the data root holds nothing else; this fork
+            # also keeps library.db, app.log, .env and cookies.txt there, and
+            # json.load on binary library.db raises UnicodeDecodeError -- which
+            # propagated out of preload() and turned /watch into a 500.
+            # main.py's startup cleanup already uses the same isdigit() rule.
+            if not i.isdigit(): continue
+            path = os.path.join(data_path, i)
+            if os.path.isdir(path): continue
+            try:
+                with open(path, 'r') as f:
                     proc[str(i)] = json.load(f)
+            except Exception:
+                # A tracker caught mid-write is not worth failing the caller
+                # over; skip it. Stale files get swept at startup.
+                continue
         return proc
 
     @staticmethod
