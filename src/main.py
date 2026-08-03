@@ -92,8 +92,22 @@ def delete_old_files():
                         keepalive_file = os.path.join(vid_path, 'keepalive')
                         mtime = 0
                         if os.path.exists(keepalive_file):
-                            with open(keepalive_file, 'r') as f:
-                                mtime = int(f.read())
+                            try:
+                                with open(keepalive_file, 'r') as f:
+                                    mtime = int(f.read())
+                            except Exception:
+                                # A corrupt keepalive used to raise straight out of
+                                # the loop, so one bad file aborted the sweep for
+                                # every directory after it. Upstream leaves mtime at
+                                # 0, which deletes the directory; we re-stamp it as
+                                # touched-now instead, so the sweep carries on and
+                                # the directory ages out on the next pass rather
+                                # than losing a library entry to one unreadable byte.
+                                mtime = int(time.time())
+                                try:
+                                    with open(keepalive_file, 'w') as f:
+                                        f.write(str(mtime))
+                                except Exception: pass
                         if time.time() - mtime > max_video_age:
                             print(f"Deleting old directory: {vid_path}")
                             shutil.rmtree(vid_path)
