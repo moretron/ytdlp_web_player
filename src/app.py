@@ -408,6 +408,27 @@ import re as _re
 _DIR_HASH_RE = _re.compile(r'^[a-f0-9]{40}$')
 
 
+def _blank_thumb():
+    """Opt-in placeholder for clients that would rather render a blank tile
+    than handle a failure.
+
+    Upstream (59b3366) returns this unconditionally, but this fork's cards
+    rely on <img onerror> to swap in the film-icon fallback and to kick off a
+    thumbnail re-fetch. Answering 200 with a black PNG would suppress both and
+    leave black boxes on the page, so it is only served when the caller asks
+    for it with `?fallback=blank` -- useful for native clients with no error
+    hook of their own.
+    """
+    buf = BytesIO()
+    Image.new('RGB', (10, 10), color='black').save(buf, format='PNG')
+    buf.seek(0)
+    return Response(buf, mimetype='image/png', headers={'Cache-Control': 'no-store'})
+
+
+def _wants_blank_thumb():
+    return (request.args.get('fallback') or '').lower() == 'blank'
+
+
 @app.route('/t/<dir_hash>.mp4')
 def serve_thumbnail_video_by_hash(dir_hash):
     """The animated preview clip some sites hand back instead of a still.
@@ -442,6 +463,8 @@ def serve_thumbnail_by_hash(dir_hash):
             return host_file(url, 'thumb')
         except Exception as e:
             pprint_exc(e)
+    if _wants_blank_thumb():
+        return _blank_thumb()
     return jsonify({"error": "no thumb or sprite"}), 404
 
 
@@ -634,6 +657,9 @@ def serve_thumbnail():
                 return _serve_sprite_tile(sprite_path)
         return host_file(url, 'thumb')
     except Exception as e:
+        if _wants_blank_thumb():
+            pprint_exc(e)
+            return _blank_thumb()
         return pprint_exc(e)
 
 
