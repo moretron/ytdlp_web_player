@@ -837,10 +837,14 @@ def send_file_partial(path, download_name: str | None = None):
     if g[0]: byte1 = int(g[0])
     if g[1]: byte2 = int(g[1])
 
+    # `bytes=a-b` is inclusive of b, so the run is b - a + 1 bytes long. A
+    # client asking for the last byte (`bytes=n-n`) must get one byte back,
+    # not zero. Clamp to EOF so an over-long end doesn't claim more than we
+    # have in Content-Range.
     length = size - byte1
     if byte2 is not None:
-        length = byte2 - byte1
-    
+        length = max(0, min(byte2 - byte1 + 1, size - byte1))
+
     data = None
     with open(path, 'rb') as f:
         f.seek(byte1)

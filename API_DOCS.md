@@ -77,7 +77,7 @@ Response:
 
 - `id` is the same value as `dir_hash` — a 40-char sha1 of the source URL. Use it as `?id=` on any single-video endpoint.
 - `thumb_url` uses the opaque id (bypasses URL-based blockers) and transparently falls back to a sprite tile when the source didn't provide a proper thumbnail.
-- `has_thumb` is `0` (none), `1` (still image) or `2` (still image **plus** an animated preview clip). When it's `2`, `GET /t/<id>.mp4` serves the clip; `/t/<id>` stays a still so `<img>` keeps working.
+- `has_thumb` is `0` (none), `1` (still image) or `2` (still image **plus** an animated preview clip). When it's `2`, `GET /t/<id>.mp4` serves the clip; `/t/<id>` stays a still so `<img>` keeps working. Both are served from the **site root**, not under `/api/v1` — see the note on `/t/` below.
 - `watch_url` still uses `?url=` since /watch is not currently an id-aware route.
 
 ### `GET /library/tags?hidden=false`
@@ -183,7 +183,11 @@ Fetch any `hls`/`direct` URL through the same server; it'll serve the appropriat
 
 302 redirect to `/t/<hash>` (which serves `thumb.jpg` or falls back to a sprite tile).
 
-`GET /t/<hash>.mp4` serves the animated preview clip when the source supplied one (`has_thumb == 2`), `404` otherwise.
+### Root-mounted: `GET /t/<hash>` and `GET /t/<hash>.mp4` (not `/api/v1/t/...`)
+
+`/t/<hash>` serves the still; `/t/<hash>.mp4` serves the animated preview clip when the source supplied one (`has_thumb == 2`), `404` otherwise. Both accept `Range` and answer `206`.
+
+**These live at the site root, not under the `/api/v1` base URL** — `GET /api/v1/t/<hash>` is a `404`. `/videos/thumb` above redirects to the root path, so following redirects gets you there automatically. Being outside the blueprint, they are also not covered by `X-API-Key` auth.
 
 ---
 
@@ -247,9 +251,11 @@ Returns every prefix the server will accept (upstream + fork extras).
 {"prefixes": ["<prefix>", "<prefix>", "<prefix>", "..."]}
 ```
 
-### `GET /thumb-proxy?url=<cdn-url>`
+### Root-mounted: `GET /thumb-proxy?url=<cdn-url>` (not `/api/v1/thumb-proxy`)
 
 Streams an image fetched by the server so the client never contacts the CDN. Used automatically for the `thumbnail` field of search results, but callable directly.
+
+**Served from the site root, not under the `/api/v1` base URL** — `GET /api/v1/thumb-proxy` is a `404`. The `thumbnail` field of a `/search` result already carries the correct root-relative path (`/thumb-proxy?url=...&ref=...`); resolve it against the host, not against the API base, and don't re-encode it as the `url` parameter of another proxy call. Being outside the blueprint, it is also not covered by `X-API-Key` auth.
 
 - Only `http`/`https` schemes. Private/loopback/link-local IPs are refused (SSRF guard).
 - Host must match a whitelisted CDN suffix by default — the image CDNs of the supported sites, listed in `allowed_suffixes` in `src/app.py`. Set `THUMB_PROXY_ALLOW_ANY=true` to lift the whitelist.
