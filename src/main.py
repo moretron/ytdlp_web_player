@@ -1,22 +1,23 @@
 import os
-import time
+import psutil
 import shutil
 import subprocess
+import sys
+import time
 from threading import Thread
 from external import External
 from dotenv import load_dotenv
-import sys
 
 os.chdir(os.path.dirname(__file__))
 
 print('Loading configuration from environment, env file and command line arguments')
 
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join('data', '.env'), override=False)
 
 for arg in sys.argv[1:]:
     if arg.startswith('-') and '=' in arg:
         key, value = arg.split('=', 1)
-        os.environ[key.upper().lstrip('-')] = value
+        os.environ[key.upper().lstrip('-').replace('-', '_')] = value
 
 app_title = os.environ.get('APP_TITLE', 'YT-DLP Player')
 theme_color = os.environ.get('THEME_COLOR', '#ff7300')
@@ -26,8 +27,10 @@ max_video_duration = int(os.environ.get('MAX_VIDEO_DURATION', '36000'))
 default_quality = int(os.environ.get('DEFAULT_QUALITY', '720'))
 max_quality = int(os.environ.get('MAX_QUALITY', '2160'))
 autoplay = (os.environ.get('AUTOPLAY', 'False')).lower() == 'true'
+min_live_buffer = float(os.environ.get('MIN_LIVE_BUFFER', '1'))
 always_transcode = (os.environ.get('ALWAYS_TRANSCODE', 'False')).lower() == 'true'
 disable_transcoding = os.environ.get('DISABLE_TRANSCODING', 'False').lower() == 'true'
+max_processes = int(os.environ.get('MAX_PROCESSES', '5'))
 autoskip_sb_segments = [seg for seg in (os.environ.get('AUTOSKIP_SB_SEGMENTS') or '').split(',') if seg != '']
 cookies_only_on_failure = (os.environ.get('COOKIES_ONLY_ON_FAILURE', 'True')).lower() == 'true'
 amoled_bg = os.environ.get('AMOLED_BG', 'False').lower() == 'true'
@@ -35,8 +38,10 @@ playlist_support = os.environ.get('PLAYLIST_SUPPORT', 'True').lower() == 'true'
 auto_bg_playback = os.environ.get('AUTO_BG_PLAYBACK', 'True').lower() == 'true'
 audio_visualizer = os.environ.get('AUDIO_VISUALIZER', 'False').lower() == 'true'
 data_path = os.path.abspath(os.environ.get('DATA_PATH', './data'))
+save_all = os.environ.get('SAVE_ALL', 'True').lower() == 'true'
 proxy = os.environ.get('PROXY', '')
 port = int(os.environ.get('PORT', '5000'))
+linked_pid = int(os.environ.get('LINKED_PID', '0'))
 
 deprecated_env = ['DOWNLOAD_PATH']
 
@@ -71,21 +76,41 @@ def ytdlp_download():
 
 def delete_old_files():
     while True:
+        if save_all:
+            time.sleep(max_video_age)
+            continue
         print(f"Running periodic removal of old files")
         try:
-            for item_name in os.listdir(data_path):
-                vid_path = os.path.join(data_path, item_name)
-                if not os.path.isdir(vid_path): continue
-
-                keepalive_file = os.path.join(vid_path, 'keepalive')
-                mtime = 0
-                if os.path.exists(keepalive_file):
-                    with open(keepalive_file, 'r') as f:
-                        mtime = int(f.read())
-                if time.time() - mtime > max_video_age:
-                    print(f"Deleting old directory: {vid_path}")
-                    shutil.rmtree(vid_path)
-
+            cache_root = os.path.join(data_path, 'cache')
+            if os.path.isdir(cache_root):
+                for site in os.listdir(cache_root):
+                    site_dir = os.path.join(cache_root, site)
+                    if not os.path.isdir(site_dir): continue
+                    for item_name in os.listdir(site_dir):
+                        vid_path = os.path.join(site_dir, item_name)
+                        if not os.path.isdir(vid_path): continue
+                        keepalive_file = os.path.join(vid_path, 'keepalive')
+                        mtime = 0
+                        if os.path.exists(keepalive_file):
+                            try:
+                                with open(keepalive_file, 'r') as f:
+                                    mtime = int(f.read())
+                            except Exception:
+                                # A corrupt keepalive used to raise straight out of
+                                # the loop, so one bad file aborted the sweep for
+                                # every directory after it. Upstream leaves mtime at
+                                # 0, which deletes the directory; we re-stamp it as
+                                # touched-now instead, so the sweep carries on and
+                                # the directory ages out on the next pass rather
+                                # than losing a library entry to one unreadable byte.
+                                mtime = int(time.time())
+                                try:
+                                    with open(keepalive_file, 'w') as f:
+                                        f.write(str(mtime))
+                                except Exception: pass
+                        if time.time() - mtime > max_video_age:
+                            print(f"Deleting old directory: {vid_path}")
+                            shutil.rmtree(vid_path)
         except Exception as e:
             print(f"Error in delete_old_files: {e}")
 
@@ -95,11 +120,26 @@ def delete_old_files():
 
 if __name__ == '__main__':
 
+    # Clean up stale Processes PID tracker files (only). Do NOT touch other
+    # root files like library.db, .env, cookies.txt, app.log.
     for item_name in os.listdir(data_path):
         item = os.path.join(data_path, item_name)
-        if not os.path.isdir(item): os.remove(item)
+        if not os.path.isdir(item) and item_name.isdigit():
+            try: os.remove(item)
+            except OSError: pass
 
     Thread(target=delete_old_files, daemon=True).start()
+
+    def pid_watcher():
+        print(f"Watching process {linked_pid}")
+        while True:
+            time.sleep(1)
+            if not psutil.pid_exists(linked_pid):
+                print(f"Process {linked_pid} exited. Exiting.")
+                os._exit(0)
+
+    if linked_pid != 0: Thread(target=pid_watcher, daemon=True).start()
+
     import uvicorn
     if getattr(sys, 'frozen', False):
         from app import wsgi

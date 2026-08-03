@@ -20,8 +20,64 @@ from flask import Response, jsonify, request, send_file
 from external import External
 from main import *
 from sb import SponsorBlock
+import library_db
 
 yt_dlp = External.yt_dlp()
+
+
+def backfill_duration(url):
+    """If meta.duration is missing but we have a local media file, ffprobe it and update meta.json."""
+    if not url: return None
+    meta_file = check_media(url, 'meta')
+    if not meta_file: return None
+    try:
+        with open(meta_file, 'r') as f:
+            meta = json.load(f)
+    except Exception:
+        return None
+    if meta.get('duration'): return meta['duration']
+
+    data_dir = get_data_dir(url)
+    try:
+        candidates = os.listdir(data_dir)
+    except OSError:
+        return None
+    probe_file = None
+    for name in sorted(candidates, reverse=True):
+        if not (name.startswith('video-') or name.startswith('audio.') or name.startswith('audio-') or name.startswith('low.')): continue
+        if name.endswith(('.temp', '.part', '.ytdl')): continue
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in ('.mp4', '.webm', '.mkv', '.mp3', '.m4a', '.opus', '.ogg', '.wav'): continue
+        probe_file = os.path.join(data_dir, name)
+        break
+    if not probe_file: return None
+
+    try:
+        duration = get_media_duration(url, {}, probe_file)
+    except Exception as e:
+        pprint_exc(e)
+        return None
+    if not duration: return None
+    meta['duration'] = duration
+    try:
+        with open(meta_file, 'w') as f:
+            json.dump(meta, f)
+        print(f'[duration-backfill] {url} -> {duration:.2f}s (from {os.path.basename(probe_file)})')
+    except Exception as e:
+        pprint_exc(e)
+    return duration
+
+
+def post_media_hooks(url, media_type=None):
+    """Fire-and-forget hooks: backfill missing duration + library upsert. Both idempotent."""
+    try:
+        backfill_duration(url)
+    except Exception as e:
+        pprint_exc(e)
+    try:
+        library_db.sync_url(url)
+    except Exception as e:
+        pprint_exc(e)
 
 
 class FileCachingLock:
@@ -74,6 +130,11 @@ class Processes:
     @staticmethod
     def setitem(item, val):
         print(f'Assigning pid {item} to {val}')
+        proc = Processes.get()
+        if len(proc.keys()) > max_processes:
+            oldest = min(proc, key=lambda k: proc[k][2])
+            print('Too many processes! Killing the oldest one')
+            Processes.rm(oldest, True)
         with open(os.path.join(data_path, str(item)), 'w') as f:
             json.dump(val, f)
 
@@ -278,7 +339,9 @@ class MediaDownloader:
 
     def run(self):
         with FileCachingLock(self.url, self.media_type) as cache:
-            if cache: return cache
+            if cache:
+                Thread(target=post_media_hooks, args=(self.url, self.media_type), daemon=True).start()
+                return cache
             self._load_variables()
             if   self.media_type.startswith('thumb'): self.thumb()
             elif self.media_type.startswith('playlist'): self.playlist()
@@ -289,7 +352,9 @@ class MediaDownloader:
             elif self.media_type.startswith('low'): self.low()
             elif self.media_type.startswith('sub'): self.sub()
             elif self.media_type.startswith('sprite'): self.sprite()
-        return check_media(url=self.url, media_type=self.media_type)
+        result = check_media(url=self.url, media_type=self.media_type)
+        Thread(target=post_media_hooks, args=(self.url, self.media_type), daemon=True).start()
+        return result
 
 
     def _load_variables(self):
@@ -324,41 +389,63 @@ class MediaDownloader:
             download_media_file(thumb_url, os.path.join(self.data_dir, 'thumb-orig'))
         except Exception as e:
             pprint_exc(e)
-        try:
-            if video_width and video_height:
-                thumb_file = check_media(url=self.url, media_type='thumb-orig')
-                if not thumb_file:
-                    print('Direct thumbnail download did not succeed. Downloading using yt-dlp.')
-                    self.ydl_opts.update({'writethumbnail': True, 'skip_download': True})
-                    YTDLP.download(self.url, self.ydl_opts)
-                    thumb_file = check_media(url=self.url, media_type='thumb-orig')
 
-                with Image.open(thumb_file) as im:
-                    im = im.convert("RGB")
+        # Some sites serve a short animated preview where others serve a still.
+        # Keep the clip as thumb.mp4 and render thumb.jpg off its first frame,
+        # so <img> consumers (og:image, favicon, playlist rows) keep working.
+        orig = check_media(url=self.url, media_type='thumb-orig')
+        if orig and is_video_file(orig):
+            video_thumb = os.path.join(self.data_dir, 'thumb.mp4')
+            try:
+                shutil.move(orig, video_thumb)
+                print(f'Thumbnail is a video preview, kept as {video_thumb}')
+                extract_first_frame(self.url, video_thumb, os.path.join(self.data_dir, 'thumb.jpg'))
+            except Exception as e:
+                pprint_exc(e)
+        else:
+            try:
+                if video_width and video_height:
+                    thumb_file = orig
+                    if not thumb_file:
+                        print('Direct thumbnail download did not succeed. Downloading using yt-dlp.')
+                        self.ydl_opts.update({'writethumbnail': True, 'skip_download': True})
+                        YTDLP.download(self.url, self.ydl_opts)
+                        thumb_file = check_media(url=self.url, media_type='thumb-orig')
 
-                    in_w, in_h = im.size
-                    target_ar = video_width / video_height
-                    if in_w / in_h > target_ar:
-                        new_w = int(in_h * target_ar)
-                        new_h = in_h
-                    else:
-                        new_h = int(in_w / target_ar)
-                        new_w = in_w
+                    with Image.open(thumb_file) as im:
+                        im = im.convert("RGB")
 
-                    left = (in_w - new_w) // 2
-                    top = (in_h - new_h) // 2
-                    right = left + new_w
-                    bottom = top + new_h
+                        in_w, in_h = im.size
+                        target_ar = video_width / video_height
+                        if in_w / in_h > target_ar:
+                            new_w = int(in_h * target_ar)
+                            new_h = in_h
+                        else:
+                            new_h = int(in_w / target_ar)
+                            new_w = in_w
 
-                    im = im.crop((left, top, right, bottom))
-                    im.save(os.path.join(self.data_dir, 'thumb.jpg'), quality=95)
+                        left = (in_w - new_w) // 2
+                        top = (in_h - new_h) // 2
+                        right = left + new_w
+                        bottom = top + new_h
 
-                print(f"Thumbnail cropped using PIL")
-                os.remove(thumb_file)
-            else:
-                print("Video dimensions not found in meta, skipping thumbnail cropping.")
-        except Exception as e:
-            print(f"Error cropping thumbnail: {e}")
+                        im = im.crop((left, top, right, bottom))
+                        im.save(os.path.join(self.data_dir, 'thumb.jpg'), quality=95)
+
+                    print(f"Thumbnail cropped using PIL")
+                    os.remove(thumb_file)
+                else:
+                    print("Video dimensions not found in meta, skipping thumbnail cropping.")
+            except Exception as e:
+                print(f"Error cropping thumbnail: {e}")
+
+        # Final fallback: if we still have no thumb.jpg but a video file is
+        # already on disk, grab a frame from the middle of it with ffmpeg.
+        thumb_path = os.path.join(self.data_dir, 'thumb.jpg')
+        if not os.path.exists(thumb_path):
+            video_path = check_media(url=self.url, media_type='video')
+            if video_path:
+                extract_middle_frame(self.url, video_path, thumb_path, self.meta)
 
 
     def playlist(self):
@@ -426,8 +513,7 @@ class MediaDownloader:
         mark_watched(self.url)
 
         res_str = 'audio' if 'audio' in self.media_type else str(self.res)
-        hls_url_dir = os.path.join(gen_pathname(self.url), f"hls_segment-{res_str}")
-        hls_output_dir = os.path.join(data_path, hls_url_dir)
+        hls_output_dir = os.path.join(self.data_dir, f'hls_segment-{res_str}')
         hls_segment_duration = hls_audio_duration if res_str == 'audio' else hls_duration
         os.makedirs(hls_output_dir, exist_ok=True)
 
@@ -478,7 +564,6 @@ class MediaDownloader:
         seg_time = 0
         seg_num = 0
         duration = get_media_duration(self.url, self.meta, ffmpeg_command[1])
-        hls_url_dir = os.path.join(gen_pathname(self.url), f"hls_segment-{res_str}")
         seg_path = f"/hls_segment?url={quote_plus(self.url)}&quality={res_str}&seg="
 
         with open(m3u8_path, "w") as f:
@@ -642,8 +727,18 @@ def check_alerts():
 
 
 def download_media_file(url: str, path_without_ext: str, ext: str|None = None):
-    """Download raw file with requests.get with selected filename"""
-    response = requests.get(url, stream=True, proxies=proxies)
+    """Download raw file with requests.get with selected filename.
+
+    Sends a browser UA and a same-origin Referer: thumbnail CDNs routinely
+    hotlink-protect their assets and answer a refererless GET with 403."""
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        p = urlparse(url)
+        if p.scheme in ('http', 'https') and p.netloc:
+            headers['Referer'] = f'{p.scheme}://{p.netloc}/'
+    except Exception:
+        pass
+    response = requests.get(url, stream=True, proxies=proxies, headers=headers)
     response.raise_for_status()
     if not ext:
         urlpath = url
@@ -674,13 +769,18 @@ def stream_media_file(url: str, headers: str|None = None, cookies: str|None = No
         response.raise_for_status()
         mime_type = response.headers.get('Content-Type', 'application/octet-stream')
 
-        if 'mpegurl' in mime_type.lower():
+        url_path = urlparse(url).path.lower()
+        is_hls = 'mpegurl' in mime_type.lower() or url_path.endswith('.m3u8') or url_path.endswith('.m3u')
+        if is_hls and 'mpegurl' not in mime_type.lower():
+            print(f'HLS detected by URL suffix despite Content-Type: {mime_type}  (url={url[:120]}...)')
+
+        if is_hls:
             lines = []
             url_regex = re.compile(r'(URI=["\'])([^"\']*)(["\'])')
 
             def replace_url(match):
                 prefix, orig_url, suffix = match.groups()
-                new_url = f'/external?url={quote_plus(urljoin(url, orig_url))}&headers={quote_plus(headers)}&cookies={quote_plus(cookies)}'
+                new_url = f'/external?url={quote_plus(urljoin(url, orig_url))}&headers={quote_plus(headers or "")}&cookies={quote_plus(cookies or "")}'
                 return f'{prefix}{new_url}{suffix}'
             raw_lines = response.content.decode('utf-8', errors='ignore').splitlines()
             skipline = False
@@ -700,9 +800,10 @@ def stream_media_file(url: str, headers: str|None = None, cookies: str|None = No
                 if line_str.startswith('#'):
                     lines.append(url_regex.sub(replace_url, line))
                 else:
-                    lines.append(f'/external?url={quote_plus(urljoin(url, line_str))}&headers={quote_plus(headers)}&cookies={quote_plus(cookies)}')
+                    line = f'/external?url={quote_plus(urljoin(url, line_str))}&headers={quote_plus(headers or "")}&cookies={quote_plus(cookies or "")}'
+                    lines.append(line)
 
-            resp = Response('\n'.join(lines), status=response.status_code, mimetype=mime_type)
+            resp = Response('\n'.join(lines), status=response.status_code, mimetype='application/vnd.apple.mpegurl')
             return resp
 
         def generate():
@@ -742,10 +843,14 @@ def send_file_partial(path, download_name: str | None = None):
     if g[0]: byte1 = int(g[0])
     if g[1]: byte2 = int(g[1])
 
+    # `bytes=a-b` is inclusive of b, so the run is b - a + 1 bytes long. A
+    # client asking for the last byte (`bytes=n-n`) must get one byte back,
+    # not zero. Clamp to EOF so an over-long end doesn't claim more than we
+    # have in Content-Range.
     length = size - byte1
     if byte2 is not None:
-        length = byte2 - byte1
-    
+        length = max(0, min(byte2 - byte1 + 1, size - byte1))
+
     data = None
     with open(path, 'rb') as f:
         f.seek(byte1)
@@ -786,15 +891,19 @@ def preload(url = None, meta = None, playlist = None):
         except:
             pass
 
+    avail_procs = max_processes - len(Processes.get().keys())
     if not check_media(url, 'meta'):
         Thread(target=get_meta, args=[url]).start()
+        avail_procs -= 1
     if not check_media(url, 'thumb'):
         Thread(target=MediaDownloader(url, 'thumb').run).start()
-    if not disable_transcoding and not check_media(url, 'hls-audio'):
+    if not disable_transcoding and not check_media(url, 'hls-audio') and avail_procs > 1:
         Thread(target=MediaDownloader(url, 'hls-audio').run).start()
+        avail_procs -= 1
     if playlist and not check_media(url, 'playlist'):
         with open(os.path.join(get_data_dir(url), 'playlist.json'), 'w') as f:
             json.dump(playlist, f)
+    if avail_procs <= 1: print('Warning: video may be loading slower than usual - consider increasing MAX_PROCESSES if that\'s an issue')
 
 
 def mark_watched(url):
@@ -806,7 +915,10 @@ def mark_watched(url):
 
 
 def get_media_duration(url, meta, media):
-    if d := meta.get("duration"): return d
+    try:
+        if d := meta.get("duration"): return d
+    except:
+        pass
     ffmpeg_command = ['-i', media, '-hide_banner', '-f', 'null', '-stats']
     ff = FFMPEG(url)
     try: ff.run(ffmpeg_command)
@@ -820,6 +932,92 @@ def get_media_duration(url, meta, media):
     raise RuntimeError('Media duration impossible to gather - report this bug')
 
 
+def is_video_file(path):
+    """True if the file is really a video container (mp4/mov/webm/mkv) rather
+    than a still. Sniffs magic bytes instead of trusting the name: thumbnail
+    URLs often carry no usable extension, and some CDNs render a still from a
+    path that still ends in `.mp4`."""
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(16)
+    except Exception:
+        return False
+    if len(head) < 12:
+        return False
+    return head[4:8] == b'ftyp' or head[:4] == b'\x1a\x45\xdf\xa3'
+
+
+def extract_first_frame(url, video_path, out_path):
+    """Render a still from the start of a video thumbnail. Unlike
+    extract_middle_frame this doesn't seek by duration — a preview clip runs
+    for a few seconds and has nothing to do with the video's own length."""
+    ffmpeg_command = ['-i', video_path, '-frames:v', '1', '-q:v', '3', '-y', out_path]
+    print(f'Rendering still thumbnail from {video_path}')
+    ff = FFMPEG(url, ffmpeg_command)
+    if ff.success and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        return True
+    print(f'Could not render a still from {video_path}')
+    try:
+        if os.path.exists(out_path) and os.path.getsize(out_path) == 0:
+            os.remove(out_path)
+    except Exception:
+        pass
+    return False
+
+
+def extract_middle_frame(url, video_path, out_path, meta=None):
+    """Fallback when no thumbnail exists: grab a frame from the midpoint of a
+    cached video with ffmpeg. Placing `-ss` before `-i` uses fast (keyframe)
+    seek, which is fine for a thumb even if not frame-exact."""
+    try:
+        duration = get_media_duration(url, meta or {}, video_path)
+    except Exception as e:
+        print(f'Middle-frame fallback: cannot determine duration for {video_path}: {e}')
+        return False
+    midpoint = max(0.1, float(duration) / 2)
+    ffmpeg_command = [
+        '-ss', f'{midpoint:.2f}',
+        '-i', video_path,
+        '-frames:v', '1',
+        '-q:v', '3',
+        '-y', out_path,
+    ]
+    print(f'Extracting middle-frame thumbnail at {midpoint:.1f}s from {video_path}')
+    ff = FFMPEG(url, ffmpeg_command)
+    if ff.success and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        return True
+    print(f'Middle-frame fallback failed for {video_path}')
+    # Clean up any zero-byte artefact so subsequent runs can retry.
+    try:
+        if os.path.exists(out_path) and os.path.getsize(out_path) == 0:
+            os.remove(out_path)
+    except OSError:
+        pass
+    return False
+
+
+def get_media_res(url, meta, media):
+    try:
+        if meta.get("width") and meta.get("height"): return int(meta.get("width")), int(meta.get("height"))
+    except: pass
+    ffmpeg_command = ['-i', media, '-hide_banner', '-f', 'null', '-stats']
+    ff = FFMPEG(url)
+    try: ff.run(ffmpeg_command)
+    except Exception: pass
+    info = ff.stdout
+    for line in info.splitlines():
+        if line.strip().startswith('Stream'):
+            for r in line.strip().split(' '):
+                try:
+                    w, h = r.split('x')
+                    w = int(w.strip(','))
+                    h = int(h.strip(','))
+                    if w > 0 and h > 0: return w, h
+                except:
+                    pass
+    raise RuntimeError('Media resolution impossible to gather - report this bug')
+
+
 def pprint_exc(e, code = 500):
     error = (re.sub(r'[^\x20-\x7e]',r'', re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", str(e))))
     traceback.print_exception(e)
@@ -831,13 +1029,13 @@ def gen_pathname(url: str):
 
 
 def get_data_dir(url):
-    data_dir = os.path.join(data_path, gen_pathname(url))
-    return data_dir
+    return library_db.data_dir_for(url)
 
 
 def get_global_cookies_file(force = False):
     if cookies_only_on_failure and not force: return None
-    if os.path.exists('cookies.txt'): return 'cookies.txt'
+    path = os.path.join(data_path, 'cookies.txt')
+    if os.path.exists(path): return path
     return None
 
 
@@ -875,6 +1073,15 @@ def get_meta(url: str):
                     meta = json.load(f)
                 max_meta_age = 60 if meta.get('is_live') else 600
                 if time.time() - meta.get('timestamp') > max_meta_age:
+                    # If the video (or audio) is already fully downloaded to
+                    # local cache, skip CDN revalidation. We don't need a live
+                    # source URL to serve bytes off disk, and re-writing
+                    # meta.json here bumps its mtime, which flows through
+                    # sync_url and makes the entry jump to the top of the
+                    # library sort on every /watch visit.
+                    if not meta.get('is_live') and (
+                            check_media(url, 'video') or check_media(url, 'audio')):
+                        return meta
                     print('Checking metadata validity...')
                     srcs = choose_sources_for_res(get_video_sources(url, meta), get_good_quality(get_video_formats(url, meta)))
                     src = srcs[0] or srcs[1]
@@ -913,6 +1120,20 @@ def get_meta(url: str):
         if cookies := check_media(url, 'cookies') or get_global_cookies_file(): ydl_opts["cookiefile"] = cookies
         info = YTDLP.get_info(url, ydl_opts)
         if info.get('entries'): info = info['entries'][0]
+
+        if not info.get('duration') or not info.get('width') or not info.get('height'):
+            try:
+                print('Fetching additional info for meta')
+                srcs = choose_sources_for_res(get_video_sources(url, info), get_good_quality(get_video_formats(url, info)))
+                src = srcs[0] or srcs[1]
+                duration = get_media_duration(url, None, src[0])
+                w, h = get_media_res(url, None, src[0])
+                info['duration'] = duration
+                info['width'] = w
+                info['height'] = h
+            except Exception as e:
+                pprint_exc(e)
+
         info['original_url'] = url
         info['timestamp'] = int(time.time())
         with open(os.path.join(get_data_dir(url), 'meta.json'), 'w') as f:
@@ -963,7 +1184,7 @@ def get_video_sources(url = None, meta = None, protocols = [], exts = []):
         if language and f.get('language') and (f.get('language') != language): continue
         if int(f.get('height') or 0) > max_quality: continue
         if (f.get('vcodec') or 'none').lower() != 'none' or ((f.get('video_ext') or 'none').lower() != 'none'):
-            video_name = f"{(f.get('height') or '')}"
+            video_name = f"{(f.get('height') or meta.get('height') or '1')}"
         if f.get('acodec', 'none') != 'none':
             audio_name = 'audio_drc' if 'drc' in f"{f.get('format_id')} {f.get('format_note')}".lower() else 'audio'
         if 'audio' in (f.get('format_id') or '') or (f.get('acodec') or 'audio_presumed') == 'audio_presumed':
@@ -1199,6 +1420,54 @@ def search(query, search_engine='auto'):
     return entries
 
 
+_SEARCH_CACHE = {}  # {query: (expiry_ts, entries)}
+_SEARCH_CACHE_TTL = max(0, int(os.getenv('SEARCH_CACHE_TTL', '3600')))
+_SEARCH_CACHE_MAX = 256
+
+
+def flat_search(query, start=None, end=None):
+    """Run a yt-dlp search query with extract_flat for speed. Preserves clean URLs
+    so results map to the same library entries as direct URL visits.
+
+    `start`/`end` are 1-based inclusive item numbers passed to yt-dlp's
+    `playlist_items`, which slices the extractor's lazy result generator. That
+    is what makes paging work for every search prefix — including the ones
+    whose site exposes no page parameter — and it stops fetching site pages
+    once `end` is reached instead of walking the whole result set.
+
+    Results are cached in-process for SEARCH_CACHE_TTL seconds (default 3600,
+    set 0 to disable). Cache key is the post-rewrite query plus the window, so
+    each page is cached separately."""
+    now = time.time()
+    window = f'{start or 1}:{end or ""}' if (start or end) else None
+    cache_key = f'{query}\x00{window}' if window else query
+    if _SEARCH_CACHE_TTL:
+        hit = _SEARCH_CACHE.get(cache_key)
+        if hit and hit[0] > now:
+            print(f'Flat search cache hit for {cache_key!r}')
+            return hit[1]
+
+    print(f'Flat search for {query}' + (f' items {window}' if window else ''))
+    ydl_opts = {'quiet': True, 'skip_download': True, 'extract_flat': 'in_playlist', 'default_search': 'auto'}
+    ydl_opts.update(ydl_global_opts)
+    ydl_opts.pop('playlistend', None)
+    ydl_opts.pop('noplaylist', None)
+    if window:
+        ydl_opts['playlist_items'] = window
+    info = YTDLP.get_info(query, ydl_opts)
+    entries = info.get('entries') or []
+
+    if _SEARCH_CACHE_TTL:
+        _SEARCH_CACHE[cache_key] = (now + _SEARCH_CACHE_TTL, entries)
+        # Evict expired, then cap to _SEARCH_CACHE_MAX (drop oldest).
+        for k in [k for k, (exp, _) in _SEARCH_CACHE.items() if exp <= now]:
+            _SEARCH_CACHE.pop(k, None)
+        if len(_SEARCH_CACHE) > _SEARCH_CACHE_MAX:
+            for k in sorted(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0])[:len(_SEARCH_CACHE) - _SEARCH_CACHE_MAX]:
+                _SEARCH_CACHE.pop(k, None)
+    return entries
+
+
 def generate_chapters(meta: dict):
     chapters = []
     try:
@@ -1253,6 +1522,7 @@ def get_video_info(meta: dict):
     info['url'] = meta.get('original_url')
     info['default_quality'] = 'audio' if 'Music' in (meta.get('categories') or []) and audio_visualizer else get_good_quality(info['formats'])
     info['autoplay'] = autoplay
+    info['min_live_buffer'] = min_live_buffer
     info['always_transcode'] = always_transcode
     info['disable_transcoding'] = disable_transcoding
     info['hls_duration'] = hls_duration

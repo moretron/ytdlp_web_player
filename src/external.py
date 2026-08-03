@@ -33,29 +33,20 @@ class External:
 
     @staticmethod
     def download_ytdlp():
-        print('Downloading latest yt-dlp...')
-        try:
-            global yt_dlp
-            External._pip_install('yt-dlp')
-            try:
-                import importlib
-                importlib.reload(yt_dlp)
-                importlib.reload(yt_dlp.version)
-                importlib.util
-            except:
-                import yt_dlp
-                import yt_dlp.version
-        except Exception as e:
-            print(f'Warning: yt-dlp update failed: {e}')
+        # Pinned to the local yt-dlp fork baked into the image. Auto-update
+        # would `pip install --upgrade yt-dlp` from PyPI and clobber the fork,
+        # losing the pornhubsearch/pornhubcategory extractors. Rebuild the
+        # image to pick up upstream changes.
+        print('yt-dlp auto-update skipped (using local fork).')
 
 
     @staticmethod
     def download_ffmpeg() -> str|None:
         try:
-            if f := shutil.which("ffmpeg"): return os.path.abspath(f)
             p = os.path.dirname(__file__)
             for f in os.listdir(p):
                 if f.startswith('ffmpeg'): return os.path.abspath(os.path.join(p, f))
+            if f := shutil.which("ffmpeg"): return os.path.abspath(f)
             try:
                 import pyffmpeg # type: ignore
             except Exception:
@@ -70,10 +61,10 @@ class External:
     @staticmethod
     def download_deno() -> str|None:
         try:
-            if f := shutil.which("deno") or shutil.which("node"): return os.path.abspath(f)
             p = os.path.dirname(__file__)
             for f in os.listdir(p):
                 if f.startswith('deno') or f.startswith('node'): return os.path.abspath(os.path.join(p, f))
+            if f := shutil.which("deno") or shutil.which("node"): return os.path.abspath(f)
             try:
                 import deno # type: ignore
             except Exception:
@@ -125,6 +116,15 @@ class External:
                     app_version = f.read()
         except Exception as e:
             print(e)
+            # No build stamp and no git: fall back to the release number the
+            # repo ships, so a from-source run still reports a version.
+            for candidate in ('VERSION', os.path.join('..', 'VERSION')):
+                try:
+                    with open(candidate, 'r') as f:
+                        app_version = f.read().strip()
+                        return app_version
+                except OSError:
+                    continue
             return '-'
         return app_version
 

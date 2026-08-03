@@ -13,7 +13,6 @@
         <link rel="icon" type="image/png" href="favicon.svg">
         <link rel="apple-touch-icon" href="/favicon512.png">
         <link rel="manifest" href="/manifest.json">
-        <meta name="theme-color" content="{{ theme_color }}">
         <style>
             html {
                 --theme-bg: {{ "#000" if amoled_bg else "#1a1a1a" }};
@@ -22,37 +21,266 @@
             }
         </style>
     </head>
-    <body>
-    
-        <div style="display: inline-block; text-align: center; width: 100%" class="non-video">
-            <img src="favicon.svg" alt="" height="250px">
-            <h1 style="margin-top: 0; margin-bottom: 100px; color: {{ theme_color }};">{{ app_title }}</h1>
-            <div id="main-input">
-                <input type="text" id="url" name="url" placeholder="Search / Paste URL / click enter" autofocus/>
-                <button onclick="handlePlayButtonClick()" id="submit">
-                    <i class="fa-solid fa-play"></i>
-                </button>
+    <body class="library-body">
+        <div class="library-page">
+            <header class="home-header">
+                <div class="home-title-row">
+                    <a class="home-title-link" href="/" title="Back to the library">
+                        <img src="favicon.svg" alt="" class="home-logo">
+                        <h1 style="color: {{ theme_color }};">{{ app_title }}</h1>
+                    </a>
+                    <span class="library-count">{{ total }} video{{ '' if total == 1 else 's' }}</span>
+                </div>
+                <div class="home-url-bar" id="main-input">
+                    <input type="text" id="url" name="url" placeholder="Filter library, paste URL, or &lt;prefix&gt;5:your query" autofocus autocomplete="off"/>
+                    <button onclick="handlePlayButtonClick()" id="submit" title="Play URL">
+                        <i class="fa-solid fa-play"></i>
+                    </button>
+                </div>
+                <p id="no-matches" class="library-empty" style="display: none; margin-top: 24px;">No videos match that filter.</p>
+                <div id="search-results" style="display: none;"></div>
+            </header>
+
+            {% if total == 0 %}
+                <p class="library-empty">
+                    No videos in the library yet. Paste a URL above to play &amp; save one.<br>
+                    Already have downloads on disk? Click <strong>Rebuild</strong> to index them.
+                </p>
+            {% else %}
+            <div class="library-shell">
+                <aside class="library-sidebar">
+                    <button class="sidebar-collapse" id="sidebar-toggle" aria-expanded="true">
+                        <i class="fa-solid fa-sliders"></i> Filters
+                        <i class="fa-solid fa-chevron-up sidebar-chevron"></i>
+                    </button>
+                    <div class="sidebar-body" id="sidebar-body">
+                        <div class="sidebar-section">
+                            <label class="sidebar-label" for="sort-select">Sort by</label>
+                            <select id="sort-select" class="sidebar-select">
+                                <option value="saved_desc">Recently added</option>
+                                <option value="saved_asc">Oldest first</option>
+                                <option value="title_asc">Title (A→Z)</option>
+                                <option value="title_desc">Title (Z→A)</option>
+                                <option value="duration_desc">Longest first</option>
+                                <option value="duration_asc">Shortest first</option>
+                                <option value="upload_desc">Upload date (newest)</option>
+                                <option value="upload_asc">Upload date (oldest)</option>
+                            </select>
+                        </div>
+                        <div class="sidebar-section">
+                            <label class="sidebar-label" for="min-count-select">Min count</label>
+                            <select id="min-count-select" class="sidebar-select" title="Hide filter chips that only apply to fewer than N videos">
+                                <option value="1">Show all</option>
+                                <option value="2" selected>2+ videos</option>
+                                <option value="3">3+ videos</option>
+                                <option value="5">5+ videos</option>
+                                <option value="10">10+ videos</option>
+                            </select>
+                        </div>
+
+                        <div id="active-filters" class="sidebar-section" style="display: none;">
+                            <div class="sidebar-label-row">
+                                <span class="sidebar-label">Active</span>
+                                <button id="clear-filters" class="chip-clear">Clear all</button>
+                            </div>
+                            <div class="chips" id="active-chip-list"></div>
+                        </div>
+
+                        {% if all_sites %}
+                            <div class="sidebar-section">
+                                <div class="sidebar-label-row">
+                                    <span class="sidebar-label">Sites</span>
+                                    <span class="sidebar-count">{{ all_sites|length }}</span>
+                                </div>
+                                <div class="chips">
+                                    {% for s in all_sites %}
+                                        <span class="chip-wrap" data-cnt="{{ s.cnt }}">
+                                            <button class="chip chip-site {{ 'chip-is-hidden' if s.hidden else '' }}" data-filter-type="site" data-filter-name="{{ s.name }}">
+                                                {{ s.name }} <span class="chip-count">{{ s.cnt }}</span>
+                                            </button>
+                                            <button class="chip-hide-toggle" data-site="{{ s.name }}" data-hidden="{{ '1' if s.hidden else '0' }}" title="{{ 'Unhide this site' if s.hidden else 'Hide this site' }}">
+                                                <i class="fa-solid {{ 'fa-eye' if s.hidden else 'fa-eye-slash' }}"></i>
+                                            </button>
+                                        </span>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        {% endif %}
+                        {% if all_categories %}
+                            <div class="sidebar-section">
+                                <div class="sidebar-label-row">
+                                    <span class="sidebar-label">Categories</span>
+                                    <span class="sidebar-count">{{ all_categories|length }}</span>
+                                </div>
+                                <div class="chips">
+                                    {% for c in all_categories %}
+                                        <button class="chip chip-cat" data-cnt="{{ c.cnt }}" data-filter-type="cat" data-filter-name="{{ c.name }}">
+                                            {{ c.name }} <span class="chip-count">{{ c.cnt }}</span>
+                                        </button>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        {% endif %}
+                        {% if all_tags %}
+                            <div class="sidebar-section">
+                                <div class="sidebar-label-row">
+                                    <span class="sidebar-label">Tags</span>
+                                    <span class="sidebar-count">{{ all_tags|length }}</span>
+                                </div>
+                                <div class="chips" id="tag-chip-list">
+                                    {% for t in all_tags %}
+                                        <button class="chip chip-tag" data-cnt="{{ t.cnt }}" data-filter-type="tag" data-filter-name="{{ t.name }}">
+                                            {{ t.name }} <span class="chip-count">{{ t.cnt }}</span>
+                                        </button>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        {% endif %}
+
+                        <div class="sidebar-section">
+                            <a href="{{ '/' if show_hidden else '/?show_hidden=1' }}" class="filter-hidden-toggle" title="{{ 'Return to normal view' if show_hidden else 'Include items you have hidden' }}">
+                                <i class="fa-solid {{ 'fa-eye-slash' if show_hidden else 'fa-eye' }}"></i>
+                                {{ 'Hide hidden items' if show_hidden else 'Show hidden items' }}
+                            </a>
+                        </div>
+                    </div>
+
+                    <button class="sidebar-collapse" id="saved-searches-toggle" aria-expanded="true">
+                        <i class="fa-solid fa-bookmark"></i> Saved searches
+                        <span class="sidebar-count" id="saved-searches-count">{{ saved_searches|length }}</span>
+                        <i class="fa-solid fa-chevron-up sidebar-chevron"></i>
+                    </button>
+                    <div class="sidebar-body" id="saved-searches-body">
+                        <div class="sidebar-section">
+                            <div class="chips" id="saved-searches-list">
+                                {% for s in saved_searches %}
+                                    <span class="chip-wrap">
+                                        <a class="chip chip-saved-search" href="/search?q={{ s.query|urlencode }}" data-query="{{ s.query }}">
+                                            <i class="fa-solid fa-magnifying-glass" style="opacity:0.6;margin-right:4px;font-size:11px;"></i>{{ s.query }}
+                                        </a>
+                                        <button class="chip-hide-toggle saved-search-remove" data-query="{{ s.query }}" title="Remove saved search">
+                                            <i class="fa-solid fa-xmark"></i>
+                                        </button>
+                                    </span>
+                                {% endfor %}
+                                {% if not saved_searches %}
+                                    <span class="sidebar-empty" style="color: var(--theme-fg); font-size: 12px; opacity: 0.6;">None yet — star a search or paste queries below.</span>
+                                {% endif %}
+                            </div>
+                            <details style="margin-top:8px;">
+                                <summary style="cursor:pointer; color: var(--theme-fg); font-size: 12px; opacity: 0.8;">+ Add (bulk)</summary>
+                                <textarea id="saved-search-input" placeholder="&lt;prefix&gt;:cats&#10;&lt;prefix&gt;:sunsets&#10;&lt;prefix&gt;:mountains" rows="3" style="width:100%;box-sizing:border-box;margin-top:6px;background:var(--theme-bg);color:var(--theme-fg);border:1px solid #333;border-radius:4px;padding:6px;font-family:ui-monospace,monospace;font-size:12px;resize:vertical;"></textarea>
+                                <button id="saved-search-add-btn" class="library-rebuild" style="margin-top:6px;width:100%;"><i class="fa-solid fa-plus"></i> Save</button>
+                                <div id="saved-search-status" style="margin-top:6px;font-size:11px;color:var(--theme-fg);opacity:0.7;"></div>
+                            </details>
+                        </div>
+                    </div>
+                </aside>
+                <main class="library-main">
+                <div class="library-grid" id="library-grid">
+                    {% for e in entries %}
+                        <div class="library-card {{ 'is-hidden-card' if e.hidden or e.site_hidden else '' }}" data-url="{{ e.url }}"
+                             data-site="{{ (e.source_site or '')|lower }}"
+                             data-cats="{{ (e.categories|join('|'))|lower }}"
+                             data-tags="{{ (e.tags|join('|'))|lower }}"
+                             data-hidden="{{ '1' if e.hidden else '0' }}"
+                             data-saved="{{ e.saved_at or 0 }}"
+                             data-duration="{{ e.duration or 0 }}"
+                             data-upload="{{ e.upload_date or '' }}"
+                             data-title="{{ (e.title or '')|lower }}">
+                            <a class="library-thumb-link" href="/watch?url={{ e.url|urlencode }}">
+                                <div class="library-thumb-wrap">
+                                    {% if e.has_thumb == 2 %}
+                                        <video class="library-thumb-video" src="/t/{{ e.dir_hash }}.mp4"
+                                               poster="/t/{{ e.dir_hash }}" preload="metadata" muted loop playsinline
+                                               onmouseenter="this.play()" onmouseleave="this.pause(); this.currentTime = 0;"></video>
+                                    {% elif e.has_thumb %}
+                                        <img loading="lazy" src="/t/{{ e.dir_hash }}" alt=""
+                                             onerror="this.remove(); this.parentElement.insertAdjacentHTML('afterbegin', '<div class=&quot;library-thumb-fallback&quot;><i class=&quot;fa-solid fa-film&quot;></i></div>');">
+                                    {% else %}
+                                        <div class="library-thumb-fallback"><i class="fa-solid fa-film"></i></div>
+                                    {% endif %}
+                                    {% if e.duration %}
+                                        <span class="library-duration">
+                                            {%- set h = (e.duration // 3600) -%}
+                                            {%- set m = ((e.duration % 3600) // 60) -%}
+                                            {%- set s = (e.duration % 60) -%}
+                                            {%- if h -%}{{ h }}:{{ '%02d' % m }}:{{ '%02d' % s }}{%- else -%}{{ m }}:{{ '%02d' % s }}{%- endif -%}
+                                        </span>
+                                    {% endif %}
+                                </div>
+                            </a>
+                            <div class="library-meta">
+                                <a class="library-title" href="/watch?url={{ e.url|urlencode }}" title="{{ e.title }}">{{ e.title }}</a>
+                                {% if e.uploader %}<div class="library-uploader">{{ e.uploader }}</div>{% endif %}
+                                {% if e.source_site or e.categories or e.tags %}
+                                    <div class="card-chips">
+                                        {% if e.source_site %}
+                                            <button class="chip chip-site chip-sm" data-filter-type="site" data-filter-name="{{ e.source_site }}">{{ e.source_site }}</button>
+                                        {% endif %}
+                                        {% for c in e.categories %}
+                                            <button class="chip chip-cat chip-sm" data-filter-type="cat" data-filter-name="{{ c }}">{{ c }}</button>
+                                        {% endfor %}
+                                        {% for t in e.tags[:3] %}
+                                            <button class="chip chip-tag chip-sm" data-filter-type="tag" data-filter-name="{{ t }}">{{ t }}</button>
+                                        {% endfor %}
+                                        {% if e.tags|length > 3 %}
+                                            <span class="chip-more" title="{{ e.tags[3:]|join(', ') }}">+{{ e.tags|length - 3 }}</span>
+                                        {% endif %}
+                                    </div>
+                                {% endif %}
+                            </div>
+                            <button class="library-hide" title="{{ 'Unhide' if e.hidden else 'Hide' }}" aria-label="{{ 'Unhide' if e.hidden else 'Hide' }}">
+                                <i class="fa-solid {{ 'fa-eye' if e.hidden else 'fa-eye-slash' }}"></i>
+                            </button>
+                        </div>
+                    {% endfor %}
+                </div>
+                </main>
             </div>
+            {% endif %}
+            <details class="url-bar-help">
+                <summary><i class="fa-solid fa-circle-question"></i> How the search box works</summary>
+                <ul>
+                    <li><strong>Filter library</strong> — just type. Cards filter live by title, uploader, or URL.</li>
+                    <li><strong>Play a URL</strong> — paste any URL yt-dlp supports and hit Enter or the play button.</li>
+                    <li><strong>Empty + Play</strong> — reads a URL from your clipboard and plays it.</li>
+                    <li><strong>Search</strong> — <code>&lt;prefix&gt;5:your query</code> asks yt-dlp to search that site for 5 results. Leaving the number off is I'm-feeling-lucky.</li>
+                    <li>
+                        Available search prefixes: {% for p in search_prefixes %}<code>{{ p }}:</code>{% if not loop.last %}, {% endif %}{% endfor %}
+                    </li>
+                </ul>
+            </details>
+            <footer class="library-footer">
+                <a href="https://github.com/Matszwe02/ytdlp_web_player" target="_blank" class="footer-link">
+                    <span title="{{app_version}}"><b>{{app_title}}</b> {{app_version}}</span>
+                </a>
+                <span class="footer-sep">·</span>
+                <span title="{{ydl_version}}">yt-dlp <b>{{ydl_version}}</b></span>
+                <span class="footer-sep">·</span>
+                <span title="{{js_runtime_version[4:]}}">{{js_runtime_version[:4]}} <b>{{js_runtime_version[4:]}}</b></span>
+                <span class="footer-sep">·</span>
+                <span title="{{ffmpeg_version}}">FFmpeg <b>{{ffmpeg_version}}</b></span>
+                <span class="footer-sep">·</span>
+                <a href="/api/docs" class="footer-link" title="REST API reference"><i class="fa-solid fa-book"></i> API docs</a>
+                <span class="footer-sep">·</span>
+                <a href="/api/docs.md" class="footer-link" title="API reference as raw markdown">markdown</a>
+            </footer>
         </div>
-        
+
         <div id="expandable-menu-container">
             <button id="expand-button" class="expand-button" aria-label="Menu">
                 <i class="fa-solid fa-chevron-up"></i>
             </button>
             <div id="expandable-content" class="expandable-content">
                 <ul>
+                    <li><a href="javascript:void(0)" id="rebuild" title="Rescan ./data and rebuild the library index"><i class="fa-solid fa-rotate"></i> Rebuild library</a></li>
+                    <li><a href="/logs"><i class="fa-solid fa-terminal"></i> Logs</a></li>
                     <li><a href="javascript:void(0)" onclick="copyExtensionScript(event)" id="script-copy"><i class="fa-solid fa-file-code"></i> Copy extension JS</a></li>
-                    <li>
-                        <a href="https://github.com/Matszwe02/ytdlp_web_player" target="_blank">
-                            <span title="{{app_version}}"><i class="fa-solid fa-circle-info"></i> Version:<br><b>{{app_version}}</b><br></span>
-                            <span title="{{ydl_version}}">YT-DLP: <b>{{ydl_version}}</b><br></span>
-                            <span title="{{js_runtime_version[4:]}}">{{js_runtime_version[:4]}}: <b>{{js_runtime_version[4:]}}</b><br></span>
-                            <span title="{{ffmpeg_version}}">FFmpeg: <b>{{ffmpeg_version}}</b><br></span>
-                        </a>
-                    </li>
                 </ul>
             </div>
         </div>
+
         <script>
             const expandButton = document.getElementById('expand-button');
             const expandableContent = document.getElementById('expandable-content');
@@ -60,13 +288,10 @@
             expandButton.addEventListener('click', function(event) {
                 event.stopPropagation();
                 isExpanded = !isExpanded;
-                if (isExpanded)
-                {
+                if (isExpanded) {
                     expandableContent.style.maxHeight = expandableContent.scrollHeight + "px";
                     expandButton.classList.add('expanded');
-                }
-                else
-                {
+                } else {
                     expandableContent.style.maxHeight = "0";
                     expandButton.classList.remove('expanded');
                 }
@@ -74,8 +299,7 @@
 
             document.addEventListener('click', function(event) {
                 const expandableMenuContainer = document.getElementById('expandable-menu-container');
-                if (isExpanded && !expandableMenuContainer.contains(event.target))
-                {
+                if (isExpanded && !expandableMenuContainer.contains(event.target)) {
                     expandButton.click();
                 }
             });
@@ -88,40 +312,520 @@
                 }
             });
 
-            function handlePlayButtonClick()
-            {
-                let url = urlInput.value.trim();
-                if (url)
-                {
-                    try
-                    {
-                        const expression = /[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/gi;
-                        if (!url.match(new RegExp(expression))) throw TypeError();
-                        if (!url.startsWith('http')) url = 'https://' + url;
-                        new URL(url);
-                        window.location.href = '/watch?url=' + encodeURIComponent(url);
+            const urlRegex = /[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/gi;
+            const YTDLP_SEARCH_PREFIXES = {{ search_prefixes|tojson }};
+            const searchPrefixRegex = YTDLP_SEARCH_PREFIXES.length
+                ? new RegExp('^(' + YTDLP_SEARCH_PREFIXES.join('|') + ')[a-z0-9]*:', 'i')
+                : /^[a-z][a-z0-9]*search[a-z0-9]*:/i;
+
+            function isYtdlpSearch(text) {
+                return searchPrefixRegex.test((text || '').trim());
+            }
+
+            function tryPlayUrl(text) {
+                let url = (text || '').trim();
+                if (!url) return false;
+                try {
+                    if (!url.match(new RegExp(urlRegex))) return false;
+                    if (!url.startsWith('http')) url = 'https://' + url;
+                    new URL(url);
+                    window.location.href = '/watch?url=' + encodeURIComponent(url);
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            }
+
+            function handlePlayButtonClick() {
+                const text = urlInput.value.trim();
+                if (text) {
+                    if (isYtdlpSearch(text)) {
+                        runYtdlpSearch(text);
+                        return;
                     }
-                    catch (e)
-                    {
-                        fetch(`/search?q=${encodeURIComponent(url)}`)
-                            .then(response => {
-                                if (!response.ok) return;
-                                response.text().then(data => {
-                                    if (!data) return;
-                                    window.location.href = '/watch?url=' + encodeURIComponent(data);
-                                });
-                            })
-                    }
+                    tryPlayUrl(text);
                     return;
                 }
-                navigator.clipboard.readText()
-                    .then(clipboardText => {
-                        url = clipboardText.trim();
-                        window.location.href = '/watch?url=' + encodeURIComponent(url);
-                    })
+                navigator.clipboard.readText().then(clipboardText => {
+                    tryPlayUrl(clipboardText);
+                });
             }
-            function copyExtensionScript(event)
-            {
+
+            const searchResultsEl = document.getElementById('search-results');
+
+            function fmtDuration(sec) {
+                if (!sec) return '';
+                const h = Math.floor(sec / 3600);
+                const m = Math.floor((sec % 3600) / 60);
+                const s = sec % 60;
+                return h ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
+                         : `${m}:${String(s).padStart(2,'0')}`;
+            }
+
+            function fmtCount(n) {
+                if (n == null) return '';
+                if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B views';
+                if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M views';
+                if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K views';
+                return n + ' views';
+            }
+
+            // Everything loaded so far for the current query. Pages are fetched
+            // one at a time and appended, so "Download all" covers every result
+            // on screen rather than only the last page.
+            let searchState = { query: '', page: 1, results: [], hasMore: false };
+
+            async function fetchSearchPage(query, page) {
+                const resp = await fetch('/ytsearch?q=' + encodeURIComponent(query) + '&page=' + page);
+                if (!resp.ok) throw new Error(await resp.text());
+                return resp.json();
+            }
+
+            async function runYtdlpSearch(query) {
+                searchResultsEl.style.display = '';
+                searchResultsEl.innerHTML = '<p class="library-empty" style="margin: 24px 0;">Searching&hellip;</p>';
+                try {
+                    const data = await fetchSearchPage(query, 1);
+                    if (!data.results || data.results.length === 0) {
+                        searchResultsEl.innerHTML = '<p class="library-empty" style="margin: 24px 0;">No results.</p>';
+                        return;
+                    }
+                    if (data.results.length === 1 && !data.has_more) {
+                        window.location.href = '/watch?url=' + encodeURIComponent(data.results[0].url);
+                        return;
+                    }
+                    searchState = { query, page: 1, results: data.results.slice(), hasMore: !!data.has_more };
+                    renderYtdlpResults(searchState.results, query);
+                } catch (e) {
+                    searchResultsEl.innerHTML = '<p class="library-empty" style="margin: 24px 0; color: #c66;">Search failed: ' + e.message + '</p>';
+                }
+            }
+
+            async function loadMoreResults(btn) {
+                const nextPage = searchState.page + 1;
+                const original = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Loading page ' + nextPage + '&hellip;';
+                try {
+                    const data = await fetchSearchPage(searchState.query, nextPage);
+                    // Each page is a fresh extraction, and some sites reorder
+                    // their results between requests, so a later page can
+                    // repeat an item we already have. Drop those.
+                    const seen = new Set(searchState.results.map(r => r.url));
+                    const fresh = (data.results || []).filter(r => !seen.has(r.url));
+                    searchState.page = nextPage;
+                    searchState.hasMore = !!data.has_more && (data.results || []).length > 0;
+                    searchState.results.push(...fresh);
+                    const grid = searchResultsEl.querySelector('.library-grid');
+                    fresh.forEach(r => grid.appendChild(buildResultCard(r)));
+                    const countEl = searchResultsEl.querySelector('.library-section-count');
+                    if (countEl) countEl.textContent = searchState.results.length;
+                    if (searchState.hasMore) {
+                        btn.disabled = false;
+                        btn.innerHTML = original;
+                    } else {
+                        btn.remove();
+                    }
+                } catch (e) {
+                    btn.disabled = false;
+                    btn.innerHTML = original;
+                    alert('Could not load page ' + nextPage + ': ' + e.message);
+                }
+            }
+
+            function renderYtdlpResults(results, query) {
+                const header = document.createElement('div');
+                header.className = 'search-results-header';
+                const savedSet = new Set(Array.from(document.querySelectorAll('.chip-saved-search')).map(a => a.dataset.query));
+                const isSaved = savedSet.has(query);
+                header.innerHTML = `
+                    <h2 class="library-section-title" style="margin-bottom: 0;">
+                        Search results
+                        <span class="library-section-count">${results.length}</span>
+                        <span style="color: var(--theme-fg); font-size: 13px; margin-left: 8px; font-weight: normal;">${query}</span>
+                    </h2>
+                    <div class="search-results-actions">
+                        <button id="save-search-btn" class="library-rebuild" data-saved="${isSaved ? '1' : '0'}" title="${isSaved ? 'Remove from saved searches' : 'Save this search'}">
+                            <i class="${isSaved ? 'fa-solid' : 'fa-regular'} fa-star"></i> ${isSaved ? 'Saved' : 'Save'}
+                        </button>
+                        <button id="download-all-btn" class="library-rebuild"><i class="fa-solid fa-download"></i> Download all</button>
+                        <button id="close-search-btn" class="library-rebuild"><i class="fa-solid fa-xmark"></i> Close</button>
+                    </div>
+                `;
+                const grid = document.createElement('div');
+                grid.className = 'library-grid';
+                results.forEach(r => grid.appendChild(buildResultCard(r)));
+                searchResultsEl.innerHTML = '';
+                searchResultsEl.appendChild(header);
+                searchResultsEl.appendChild(grid);
+
+                if (searchState.hasMore) {
+                    const more = document.createElement('div');
+                    more.className = 'search-load-more';
+                    more.innerHTML = '<button id="load-more-btn" class="library-rebuild"><i class="fa-solid fa-angles-down"></i> Load more</button>';
+                    searchResultsEl.appendChild(more);
+                    document.getElementById('load-more-btn').addEventListener('click', (ev) => loadMoreResults(ev.currentTarget));
+                }
+
+                document.getElementById('close-search-btn').addEventListener('click', () => {
+                    searchResultsEl.style.display = 'none';
+                    searchResultsEl.innerHTML = '';
+                });
+                // Reads searchState so it picks up pages loaded after this render.
+                document.getElementById('download-all-btn').addEventListener('click', () => downloadAll(searchState.results));
+                document.getElementById('save-search-btn').addEventListener('click', (ev) => toggleSaveSearch(query, ev.currentTarget));
+            }
+
+            function buildResultCard(r) {
+                const card = document.createElement('div');
+                card.className = 'library-card';
+                card.dataset.url = r.url;
+                card.innerHTML = `
+                    <a class="library-thumb-link" href="/watch?url=${encodeURIComponent(r.url)}">
+                        <div class="library-thumb-wrap">
+                            ${r.thumbnail
+                                ? `<img loading="lazy" src="${r.thumbnail}" alt="" referrerpolicy="no-referrer">`
+                                : `<div class="library-thumb-fallback"><i class="fa-solid fa-film"></i></div>`}
+                            ${r.duration ? `<span class="library-duration">${fmtDuration(r.duration)}</span>` : ''}
+                        </div>
+                    </a>
+                    <div class="library-meta">
+                        <a class="library-title" href="/watch?url=${encodeURIComponent(r.url)}" title="">${escapeHtml(r.title || r.url)}</a>
+                        ${r.uploader ? `<div class="library-uploader">${escapeHtml(r.uploader)}</div>` : ''}
+                        ${r.view_count ? `<div class="library-uploader">${fmtCount(r.view_count)}</div>` : ''}
+                    </div>
+                `;
+                return card;
+            }
+
+            async function toggleSaveSearch(query, btn) {
+                const wasSaved = btn.dataset.saved === '1';
+                btn.disabled = true;
+                try {
+                    if (wasSaved) {
+                        const resp = await fetch('/api/v1/saved-searches?q=' + encodeURIComponent(query), { method: 'DELETE' });
+                        if (!resp.ok && resp.status !== 404) throw new Error('HTTP ' + resp.status);
+                    } else {
+                        const body = new URLSearchParams({ q: query });
+                        const resp = await fetch('/api/v1/saved-searches', { method: 'POST', body });
+                        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                    }
+                    const nowSaved = !wasSaved;
+                    btn.dataset.saved = nowSaved ? '1' : '0';
+                    btn.title = nowSaved ? 'Remove from saved searches' : 'Save this search';
+                    btn.innerHTML = `<i class="${nowSaved ? 'fa-solid' : 'fa-regular'} fa-star"></i> ${nowSaved ? 'Saved' : 'Save'}`;
+                    reloadSavedSearches();
+                } catch (e) {
+                    alert('Save/unsave failed: ' + e.message);
+                } finally {
+                    btn.disabled = false;
+                }
+            }
+
+            async function reloadSavedSearches() {
+                try {
+                    const resp = await fetch('/api/v1/saved-searches');
+                    if (!resp.ok) return;
+                    const data = await resp.json();
+                    renderSavedSearches(data.saved_searches || []);
+                } catch (e) { /* silent */ }
+            }
+
+            function renderSavedSearches(items) {
+                const list = document.getElementById('saved-searches-list');
+                const count = document.getElementById('saved-searches-count');
+                if (!list) return;
+                count.textContent = items.length;
+                if (!items.length) {
+                    list.innerHTML = '<span class="sidebar-empty" style="color: var(--theme-fg); font-size: 12px; opacity: 0.6;">None yet — star a search or paste queries below.</span>';
+                    return;
+                }
+                list.innerHTML = items.map(s => `
+                    <span class="chip-wrap">
+                        <a class="chip chip-saved-search" href="/search?q=${encodeURIComponent(s.query)}" data-query="${escapeHtml(s.query)}">
+                            <i class="fa-solid fa-magnifying-glass" style="opacity:0.6;margin-right:4px;font-size:11px;"></i>${escapeHtml(s.query)}
+                        </a>
+                        <button class="chip-hide-toggle saved-search-remove" data-query="${escapeHtml(s.query)}" title="Remove saved search">
+                            <i class="fa-solid fa-xmark"></i>
+                        </button>
+                    </span>
+                `).join('');
+                wireSavedSearchButtons();
+            }
+
+            function wireSavedSearchButtons() {
+                document.querySelectorAll('.saved-search-remove').forEach(btn => {
+                    btn.onclick = async (ev) => {
+                        ev.preventDefault();
+                        const q = btn.dataset.query;
+                        try {
+                            const resp = await fetch('/api/v1/saved-searches?q=' + encodeURIComponent(q), { method: 'DELETE' });
+                            if (!resp.ok && resp.status !== 404) throw new Error('HTTP ' + resp.status);
+                            reloadSavedSearches();
+                            // Also update star button state if currently viewing this search
+                            const starBtn = document.getElementById('save-search-btn');
+                            const urlInputEl = document.getElementById('url');
+                            if (starBtn && urlInputEl && urlInputEl.value.trim() === q) {
+                                starBtn.dataset.saved = '0';
+                                starBtn.title = 'Save this search';
+                                starBtn.innerHTML = '<i class="fa-regular fa-star"></i> Save';
+                            }
+                        } catch (e) {
+                            alert('Remove failed: ' + e.message);
+                        }
+                    };
+                });
+            }
+
+            wireSavedSearchButtons();
+
+            (function () {
+                const addBtn = document.getElementById('saved-search-add-btn');
+                const input = document.getElementById('saved-search-input');
+                const statusEl = document.getElementById('saved-search-status');
+                if (!addBtn || !input) return;
+                addBtn.addEventListener('click', async () => {
+                    const raw = input.value.trim();
+                    if (!raw) { statusEl.textContent = 'nothing to save'; return; }
+                    addBtn.disabled = true;
+                    statusEl.textContent = 'Saving...';
+                    try {
+                        const body = new URLSearchParams({ queries: raw });
+                        const resp = await fetch('/api/v1/saved-searches', { method: 'POST', body });
+                        const data = await resp.json();
+                        const parts = [];
+                        if (data.added && data.added.length) parts.push(`added ${data.added.length}`);
+                        if (data.skipped && data.skipped.length) parts.push(`already had ${data.skipped.length}`);
+                        if (data.errors && data.errors.length) parts.push(`${data.errors.length} rejected: ${data.errors.map(e => e.reason).join(', ')}`);
+                        statusEl.textContent = parts.join(' · ') || 'nothing to save';
+                        if (data.added && data.added.length) input.value = '';
+                        reloadSavedSearches();
+                    } catch (e) {
+                        statusEl.textContent = 'error: ' + e.message;
+                    } finally {
+                        addBtn.disabled = false;
+                    }
+                });
+            })();
+
+            function escapeHtml(s) {
+                return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+            }
+
+            async function downloadAll(results) {
+                const btn = document.getElementById('download-all-btn');
+                btn.disabled = true;
+                const total = results.length;
+                let done = 0;
+                for (const r of results) {
+                    btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> ${done}/${total}`;
+                    try {
+                        await fetch('/watch?url=' + encodeURIComponent(r.url), { method: 'GET' });
+                    } catch (e) { /* keep going */ }
+                    done++;
+                }
+                btn.innerHTML = `<i class="fa-solid fa-check"></i> Queued ${total}. Rebuild to index them.`;
+                btn.disabled = false;
+            }
+
+            // Auto-run search when the page is opened with ?q=... (used by
+            // bookmarkable /search?q=<prefix>:terms URLs).
+            (function () {
+                const q = new URLSearchParams(window.location.search).get('q');
+                if (q && isYtdlpSearch(q)) {
+                    urlInput.value = q;
+                    runYtdlpSearch(q);
+                }
+            })();
+
+            const noMatchesEl = document.getElementById('no-matches');
+            const gridEl = document.getElementById('library-grid');
+            const cards = Array.from(document.querySelectorAll('.library-card'));
+            const activeFiltersEl = document.getElementById('active-filters');
+            const activeChipList = document.getElementById('active-chip-list');
+            const clearFiltersBtn = document.getElementById('clear-filters');
+            const sortSelect = document.getElementById('sort-select');
+            const minCountSelect = document.getElementById('min-count-select');
+            const sidebarToggle = document.getElementById('sidebar-toggle');
+            const sidebarBody = document.getElementById('sidebar-body');
+
+            const activeFilters = { site: new Set(), cat: new Set(), tag: new Set() };
+            const FILTER_ATTR = { site: 'data-site', cat: 'data-cats', tag: 'data-tags' };
+
+            function cardHasAll(card, type, needed) {
+                if (needed.size === 0) return true;
+                const raw = (card.getAttribute(FILTER_ATTR[type]) || '');
+                if (!raw) return false;
+                const set = new Set(raw.split('|').filter(Boolean));
+                for (const n of needed) if (!set.has(n)) return false;
+                return true;
+            }
+
+            function refreshChipStates() {
+                document.querySelectorAll('.chip[data-filter-type]').forEach(chip => {
+                    const type = chip.getAttribute('data-filter-type');
+                    const name = chip.getAttribute('data-filter-name').toLowerCase();
+                    chip.classList.toggle('active', activeFilters[type].has(name));
+                });
+                renderActiveFilters();
+                if (minCountSelect) applyMinCount(minCountSelect.value);
+            }
+
+            function renderActiveFilters() {
+                if (!activeFiltersEl || !activeChipList) return;
+                const total = activeFilters.site.size + activeFilters.cat.size + activeFilters.tag.size;
+                if (total === 0) {
+                    activeFiltersEl.style.display = 'none';
+                    return;
+                }
+                activeFiltersEl.style.display = '';
+                activeChipList.innerHTML = '';
+                for (const [type, set] of [['site', activeFilters.site], ['cat', activeFilters.cat], ['tag', activeFilters.tag]]) {
+                    for (const name of set) {
+                        const b = document.createElement('button');
+                        b.className = 'chip chip-active chip-' + type;
+                        b.dataset.filterType = type;
+                        b.dataset.filterName = name;
+                        b.innerHTML = name + ' <i class="fa-solid fa-xmark"></i>';
+                        b.addEventListener('click', () => toggleFilter(type, name));
+                        activeChipList.appendChild(b);
+                    }
+                }
+            }
+
+            function applyFilter() {
+                const q = urlInput.value.trim().toLowerCase();
+                let anyVisible = false;
+                cards.forEach(card => {
+                    let match = true;
+                    if (q) {
+                        const title = (card.querySelector('.library-title')?.textContent || '').toLowerCase();
+                        const uploader = (card.querySelector('.library-uploader')?.textContent || '').toLowerCase();
+                        const url = (card.getAttribute('data-url') || '').toLowerCase();
+                        if (!(title.includes(q) || uploader.includes(q) || url.includes(q))) match = false;
+                    }
+                    if (match && !cardHasAll(card, 'site', activeFilters.site)) match = false;
+                    if (match && !cardHasAll(card, 'cat', activeFilters.cat)) match = false;
+                    if (match && !cardHasAll(card, 'tag', activeFilters.tag)) match = false;
+                    card.style.display = match ? '' : 'none';
+                    if (match) anyVisible = true;
+                });
+                const anyFilter = q || activeFilters.site.size || activeFilters.cat.size || activeFilters.tag.size;
+                if (noMatchesEl) noMatchesEl.style.display = (anyFilter && !anyVisible) ? '' : 'none';
+            }
+
+            const SORT_FNS = {
+                saved_desc:    (a, b) => (+b.dataset.saved) - (+a.dataset.saved),
+                saved_asc:     (a, b) => (+a.dataset.saved) - (+b.dataset.saved),
+                title_asc:     (a, b) => (a.dataset.title || '').localeCompare(b.dataset.title || ''),
+                title_desc:    (a, b) => (b.dataset.title || '').localeCompare(a.dataset.title || ''),
+                duration_desc: (a, b) => (+b.dataset.duration) - (+a.dataset.duration),
+                duration_asc:  (a, b) => (+a.dataset.duration) - (+b.dataset.duration),
+                upload_desc:   (a, b) => (b.dataset.upload || '').localeCompare(a.dataset.upload || ''),
+                upload_asc:    (a, b) => (a.dataset.upload || '').localeCompare(b.dataset.upload || ''),
+            };
+
+            function applySort(key) {
+                const fn = SORT_FNS[key] || SORT_FNS.saved_desc;
+                if (!gridEl) return;
+                const sorted = cards.slice().sort(fn);
+                const frag = document.createDocumentFragment();
+                sorted.forEach(c => frag.appendChild(c));
+                gridEl.appendChild(frag);
+                try { localStorage.setItem('library_sort', key); } catch (e) {}
+            }
+
+            if (sortSelect) {
+                const savedKey = (() => {
+                    try { return localStorage.getItem('library_sort'); } catch (e) { return null; }
+                })();
+                if (savedKey && SORT_FNS[savedKey]) sortSelect.value = savedKey;
+                sortSelect.addEventListener('change', () => applySort(sortSelect.value));
+                // Initial sort matches the selector (server order is already saved_desc,
+                // so re-sort only if user has a different saved preference)
+                if (savedKey && savedKey !== 'saved_desc') applySort(savedKey);
+            }
+
+            function toggleFilter(type, name) {
+                name = name.toLowerCase();
+                const set = activeFilters[type];
+                if (set.has(name)) set.delete(name); else set.add(name);
+                refreshChipStates();
+                applyFilter();
+            }
+
+            document.addEventListener('click', (ev) => {
+                const chip = ev.target.closest('.chip[data-filter-type]');
+                if (!chip || chip.classList.contains('chip-active')) return;
+                toggleFilter(chip.getAttribute('data-filter-type'), chip.getAttribute('data-filter-name'));
+            });
+
+            if (clearFiltersBtn) clearFiltersBtn.addEventListener('click', () => {
+                activeFilters.site.clear();
+                activeFilters.cat.clear();
+                activeFilters.tag.clear();
+                refreshChipStates();
+                applyFilter();
+            });
+
+            function applyMinCount(min) {
+                min = parseInt(min, 10) || 1;
+                document.querySelectorAll('.chip[data-cnt], .chip-wrap[data-cnt]').forEach(el => {
+                    const c = parseInt(el.dataset.cnt || '0', 10);
+                    const chip = el.classList.contains('chip') ? el : el.querySelector('.chip');
+                    // Never hide an active filter — user is currently using it
+                    const isActive = chip && chip.classList.contains('active');
+                    el.style.display = (c < min && !isActive) ? 'none' : '';
+                });
+                try { localStorage.setItem('library_min_count', String(min)); } catch (e) {}
+            }
+
+            if (minCountSelect) {
+                const savedMin = (() => {
+                    try { return localStorage.getItem('library_min_count'); } catch (e) { return null; }
+                })();
+                if (savedMin) minCountSelect.value = savedMin;
+                minCountSelect.addEventListener('change', () => applyMinCount(minCountSelect.value));
+                applyMinCount(minCountSelect.value);
+            }
+
+            if (sidebarToggle && sidebarBody) {
+                const collapsed = (() => {
+                    try { return localStorage.getItem('sidebar_collapsed') === '1'; } catch (e) { return false; }
+                })();
+                if (collapsed) {
+                    sidebarBody.classList.add('collapsed');
+                    sidebarToggle.setAttribute('aria-expanded', 'false');
+                }
+                sidebarToggle.addEventListener('click', () => {
+                    const nowCollapsed = !sidebarBody.classList.contains('collapsed');
+                    sidebarBody.classList.toggle('collapsed', nowCollapsed);
+                    sidebarToggle.setAttribute('aria-expanded', String(!nowCollapsed));
+                    try { localStorage.setItem('sidebar_collapsed', nowCollapsed ? '1' : '0'); } catch (e) {}
+                });
+            }
+
+            const savedSearchesToggle = document.getElementById('saved-searches-toggle');
+            const savedSearchesBody = document.getElementById('saved-searches-body');
+            if (savedSearchesToggle && savedSearchesBody) {
+                const collapsed = (() => {
+                    try { return localStorage.getItem('saved_searches_collapsed') === '1'; } catch (e) { return false; }
+                })();
+                if (collapsed) {
+                    savedSearchesBody.classList.add('collapsed');
+                    savedSearchesToggle.setAttribute('aria-expanded', 'false');
+                }
+                savedSearchesToggle.addEventListener('click', () => {
+                    const nowCollapsed = !savedSearchesBody.classList.contains('collapsed');
+                    savedSearchesBody.classList.toggle('collapsed', nowCollapsed);
+                    savedSearchesToggle.setAttribute('aria-expanded', String(!nowCollapsed));
+                    try { localStorage.setItem('saved_searches_collapsed', nowCollapsed ? '1' : '0'); } catch (e) {}
+                });
+            }
+
+            urlInput.addEventListener('input', applyFilter);
+
+            function copyExtensionScript(event) {
                 fetch('https://raw.githubusercontent.com/Matszwe02/ytdlp_web_player/refs/heads/main/extension/extension.js')
                     .then(response => {
                         if (!response.ok) return;
@@ -136,6 +840,77 @@
                         });
                     })
             }
+
+            const rebuildBtn = document.getElementById('rebuild');
+            rebuildBtn.addEventListener('click', async () => {
+                const originalHTML = rebuildBtn.innerHTML;
+                rebuildBtn.disabled = true;
+                rebuildBtn.innerHTML = '<i class="fa-solid fa-rotate fa-spin"></i> Rebuilding';
+                try {
+                    const resp = await fetch('/library/rebuild', { method: 'POST' });
+                    if (!resp.ok) throw new Error(await resp.text());
+                    const data = await resp.json();
+                    rebuildBtn.innerHTML = '<i class="fa-solid fa-check"></i> ' + data.count + ' indexed';
+                    setTimeout(() => window.location.reload(), 700);
+                } catch (e) {
+                    alert('Rebuild failed: ' + e.message);
+                    rebuildBtn.innerHTML = originalHTML;
+                    rebuildBtn.disabled = false;
+                }
+            });
+
+            document.querySelectorAll('.library-hide').forEach(btn => {
+                btn.addEventListener('click', async (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    const card = btn.closest('.library-card');
+                    const url = card.getAttribute('data-url');
+                    const currentlyHidden = card.getAttribute('data-hidden') === '1';
+                    const endpoint = currentlyHidden ? '/library/unhide' : '/library/hide';
+                    btn.disabled = true;
+                    try {
+                        const resp = await fetch(endpoint + '?url=' + encodeURIComponent(url), { method: 'POST' });
+                        if (!resp.ok) throw new Error(await resp.text());
+                        // If we're in default view and just hid: remove from DOM
+                        // If in show-hidden view: flip icon + data attribute
+                        const showHidden = new URLSearchParams(window.location.search).get('show_hidden');
+                        if (!showHidden && !currentlyHidden) {
+                            card.remove();
+                            applyFilter();
+                        } else {
+                            const nowHidden = !currentlyHidden;
+                            card.setAttribute('data-hidden', nowHidden ? '1' : '0');
+                            card.classList.toggle('is-hidden-card', nowHidden || (card.getAttribute('data-site-hidden') === '1'));
+                            btn.innerHTML = '<i class="fa-solid ' + (nowHidden ? 'fa-eye' : 'fa-eye-slash') + '"></i>';
+                            btn.title = nowHidden ? 'Unhide' : 'Hide';
+                        }
+                    } catch (e) {
+                        alert('Failed: ' + e.message);
+                    } finally {
+                        btn.disabled = false;
+                    }
+                });
+            });
+
+            document.querySelectorAll('.chip-hide-toggle').forEach(btn => {
+                btn.addEventListener('click', async (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    const site = btn.getAttribute('data-site');
+                    const currentlyHidden = btn.getAttribute('data-hidden') === '1';
+                    const endpoint = currentlyHidden ? '/library/site/unhide' : '/library/site/hide';
+                    btn.disabled = true;
+                    try {
+                        const resp = await fetch(endpoint + '?name=' + encodeURIComponent(site), { method: 'POST' });
+                        if (!resp.ok) throw new Error(await resp.text());
+                        window.location.reload();
+                    } catch (e) {
+                        alert('Failed: ' + e.message);
+                        btn.disabled = false;
+                    }
+                });
+            });
+
             if (typeof navigator.serviceWorker !== 'undefined')
                 navigator.serviceWorker.register("/sw.js", { scope: '/' })
         </script>

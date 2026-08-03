@@ -41,6 +41,19 @@ try
 catch {}
 
 
+function windowHref()
+{
+    try
+    {
+        return window.top.location.href;
+    }
+    catch
+    {
+        return window.location.href;
+    }
+}
+
+
 function blockVideos()
 {
     if (!tabEnabled) return;
@@ -88,7 +101,13 @@ function unblockVideos()
 
 function getIframeContainer()
 {
-    let ordered_video_types = ['.html5-video-player', 'shreddit-player', 'video', 'img'];
+    let ordered_video_types = [
+        '.html5-video-player',
+        'shreddit-player,.vimeo-player,.jwplayer,.video-js,.wistia_embed,.flowplayer,.dm_player_container',
+        '.player,.video',
+        'video',
+        'img'
+    ];
     let allVideos = [];
     for (let index = 0; index < ordered_video_types.length; index++) {
         allVideos = Array.from(document.querySelectorAll(ordered_video_types[index]));
@@ -139,8 +158,17 @@ function getIframeContainer()
         }
         let left = Math.max(Math.min(window.innerWidth - 10, rect.left + rect.width / 2), 10);
         let top = Math.max(Math.min(window.innerHeight - 10, rect.top + rect.height / 2), 10);
+        let currentOrigin = new URL(windowHref()).origin;
         document.elementsFromPoint(left, top).forEach((el, i) => {
-            if (el.tagName == "A") altSrc = el.href;
+            if (el.tagName == "A")
+            {
+                try
+                {
+                    let url = new URL(el.href, currentOrigin);
+                    altSrc = (currentOrigin === url.origin && url.pathname != '/') ? url.href : altSrc;
+                }
+                catch {}
+            }
         });
         while (bestVideo.parentElement !== document.body)
         {
@@ -180,7 +208,7 @@ function createIframe(src='')
                 action: 'postCookies',
                 playerUrl: playerUrl,
                 documentCookies: document.cookie,
-                currentWebsiteUrl: window.top.location.href
+                currentWebsiteUrl: windowHref()
             });
         }
         catch (error)
@@ -240,7 +268,7 @@ function updateIframeGeometry(forceZero = false)
 function updateIframe(updateContainer = false)
 {
     if (!tabEnabled) return;
-    let src = altSrc || window.top.location.href;
+    let src = altSrc || windowHref();
     let srcUrl = new URL(src);
     let iframeEnabled = srcUrl.pathname != '/' || srcUrl.search || altSrc;
     let iframeSrc = `${playerUrl}/iframe?url=${encodeURIComponent(src)}`;
@@ -380,6 +408,7 @@ function tryStart()
     }
     try
     {
+        if (new URL(windowHref()).origin == new URL(playerUrl).origin) return;
         start();
     }
     catch (error)
@@ -394,17 +423,19 @@ function tryStart()
 
 function updateAllowedDomains(allowedDomains)
 {
-    const currentUrl = new URL(window.top.location.href);
+    const currentUrl = new URL(windowHref());
     const hostname = currentUrl.hostname;
 
     const allowedDomainsList = allowedDomains.split(',').map(domain => domain.trim());
     if (allowedDomainsList.some(allowedDomain => { return hostname === allowedDomain || hostname.endsWith(`.${allowedDomain}`); }))
     {
         tryStart();
+        return true;
     }
     else
     {
         stop();
+        return false;
     }
 }
 
@@ -436,8 +467,26 @@ else
 {
     try
     {
-        GM_registerMenuCommand("Start", start);
-        GM_registerMenuCommand("Stop", stop);
+        var startCmd = null;
+        function GM_toggleStart(state = null)
+        {
+            if (startCmd) GM_unregisterMenuCommand(startCmd);
+            tabEnabled = !tabEnabled;
+            if (state === true || state === false) tabEnabled = state;
+            if (tabEnabled)
+            {
+                console.warn('Toggle (start)');
+                startCmd = GM_registerMenuCommand("Stop", GM_toggleStart);
+                start();
+            }
+            else
+            {
+                console.warn('Toggle (stop)');
+                startCmd = GM_registerMenuCommand("Start", GM_toggleStart);
+                stop();
+            }
+        }
+        GM_toggleStart(false);
 
         playerUrl = playerUrl || GM_getValue("playerUrl", null);
         if (!playerUrl)
@@ -449,7 +498,7 @@ else
         function GM_toggleDomain()
         {
             var allowedDomains = GM_loadDomains().split(',');
-            const currentUrl = new URL(window.top.location.href);
+            const currentUrl = new URL(windowHref());
             if (allowedDomains.includes(currentUrl.hostname))
             {
                 allowedDomains.pop(currentUrl.hostname);
@@ -460,27 +509,27 @@ else
             }
             allowedDomains = allowedDomains.join(',');
             GM_setValue("allowedDomains", allowedDomains);
-            updateAllowedDomains(GM_loadDomains());   
+            GM_toggleStart(updateAllowedDomains(GM_loadDomains()));
         }
 
-        var cmd = null;
+        var domainCmd = null;
         function GM_loadDomains()
         {
-            if (cmd) GM_unregisterMenuCommand(cmd);
+            if (domainCmd) GM_unregisterMenuCommand(domainCmd);
             var allowedDomains = GM_getValue("allowedDomains", '').split(',').map(domain => domain.trim());
             console.warn(allowedDomains);
-            const currentUrl = new URL(window.top.location.href);
+            const currentUrl = new URL(windowHref());
             if (allowedDomains.includes(currentUrl.hostname))
             {
-                cmd = GM_registerMenuCommand("Remove Current Domain", GM_toggleDomain);
+                domainCmd = GM_registerMenuCommand("Remove Current Domain", GM_toggleDomain);
             }
             else
             {
-                cmd = GM_registerMenuCommand("Add Current Domain", GM_toggleDomain);
+                domainCmd = GM_registerMenuCommand("Add Current Domain", GM_toggleDomain);
             }
             return allowedDomains.join(',');
         }
-        updateAllowedDomains(GM_loadDomains());
+        GM_toggleStart(updateAllowedDomains(GM_loadDomains()));
     }
     catch
     {
