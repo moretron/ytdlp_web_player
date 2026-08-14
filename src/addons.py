@@ -1459,7 +1459,11 @@ def get_sprite(url = None, meta = None, simulate = False):
         return None
 
 
-_VIDEO_THUMB_RE = re.compile(r'\.(mp4|webm|m4v|mov)([/?#]|$)', re.IGNORECASE)
+# A video extension counts only when it ends the resource (optionally followed
+# by a query/fragment). `.mp4/` mid-path is an image-transformer URL — e.g.
+# phncdn's `original_X.mp4/plain/rs:fit:320:180/vts:23` — which returns a JPEG
+# still rendered from the video, and must NOT be filtered out.
+_VIDEO_THUMB_RE = re.compile(r'\.(mp4|webm|m4v|mov)([?#]|$)', re.IGNORECASE)
 
 
 def pick_search_thumbnail(entry):
