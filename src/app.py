@@ -718,10 +718,42 @@ def resp_direct():
         res = request.args.get('quality') or ''
         media_type = f'direct-{res}'.removesuffix('-')
         url = get_url(request)
-        media = check_media(url, media_type)
-        if media and media.endswith('.url'):
-            with open(media, 'r') as f:
+        def stream_from_url_file(path):
+            with open(path, 'r') as f:
                 return stream_media_file(f.readline().rstrip('\n'), f.readline().rstrip('\n'), f.readline().rstrip('\n'))
+
+        def resp_status(resp):
+            if isinstance(resp, tuple): return resp[1]
+            return getattr(resp, 'status_code', 200)
+
+        media = check_media(url, media_type)
+        if not media:
+            # Build the redirect file, then fall through to the streaming
+            # branch below. host_file() would send the just-written .url text
+            # file itself, which players fail on instantly — only a client
+            # that happened to warm the cache with an extra request ever hit
+            # the correct path.
+            MediaDownloader(url, media_type).run()
+            media = check_media(url, media_type)
+        if media and media.endswith('.url'):
+            resp = stream_from_url_file(media)
+            if resp_status(resp) < 400:
+                return resp
+            # The CDN URL inside the redirect file carries a signed expiry;
+            # once it lapses the CDN refuses (e.g. 472) and this file is dead
+            # weight. Prefer any locally cached copy, else force a fresh meta
+            # (the stale source came from it) and rebuild once.
+            print(f'Stale redirect file {media}, self-healing')
+            local = (check_media(url, f'video-{res}') if res else None) \
+                or check_media(url, 'audio' if res == 'audio' else 'video')
+            if local and not local.endswith('.url'):
+                return send_file_partial(local)
+            os.remove(media)
+            if meta_path := check_media(url, 'meta'): os.remove(meta_path)
+            MediaDownloader(url, media_type).run()
+            media = check_media(url, media_type)
+            if media and media.endswith('.url'):
+                return stream_from_url_file(media)
         return host_file(url, media_type)
     except Exception as e:
         return pprint_exc(e)

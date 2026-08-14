@@ -380,25 +380,45 @@ def video_meta():
 
 @bp.route('/videos/streams', methods=['GET', 'OPTIONS'])
 def video_streams():
+    from main import disable_transcoding
     url = _normalize_url_arg()
     if not url: return _err("url parameter required")
     try:
         formats = get_video_formats(url)
+        if not formats:
+            # A meta.json written by preload() from a flat search entry has no
+            # 'formats' array at all, which would leave only the synthetic
+            # audio option — a dead end for video clients. Refetch the full
+            # meta. (A full meta without video formats — an audio-only site —
+            # has the key and is left alone.)
+            meta_path = check_media(url, 'meta')
+            if meta_path:
+                try:
+                    with open(meta_path, 'r') as f:
+                        is_flat_stub = 'formats' not in json.load(f)
+                except Exception:
+                    is_flat_stub = True
+                if is_flat_stub:
+                    os.remove(meta_path)
+                    formats = get_video_formats(url)
     except Exception as e:
         return _err(str(e), 500)
     enc = quote_plus(url)
     dir_hash = library_db.dir_hash(url)
+    # With transcoding disabled /hls still answers with a manifest whose
+    # segments will never be produced — don't advertise it.
+    hls = (lambda res: f"/hls?url={enc}&quality={res}") if not disable_transcoding else (lambda res: "")
     options = []
     for res in formats:
         options.append({
             "quality": res,
-            "hls": f"/hls?url={enc}&quality={res}",
+            "hls": hls(res),
             "direct": f"/direct?url={enc}&quality={res}",
             "download": f"/download?url={enc}&quality={res}",
         })
     options.append({
         "quality": "audio",
-        "hls": f"/hls?url={enc}&quality=audio",
+        "hls": hls('audio'),
         "direct": f"/direct?url={enc}&quality=audio",
         "download": f"/download?url={enc}&quality=audio",
     })
