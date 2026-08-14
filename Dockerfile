@@ -25,6 +25,7 @@ COPY --from=builder /build/version.txt /app/
 COPY ytdlp_web_player/src/. /app
 COPY ytdlp_web_player/API_DOCS.md /app/API_DOCS.md
 COPY ytdlp_web_player/VERSION /app/VERSION
+COPY ytdlp_web_player/extension/extension.js /app/static/extension.js
 EXPOSE 5000
 ENV FLASK_APP=main.py
 CMD ["python3", "main.py"]

@@ -1385,6 +1385,10 @@ def get_sprite(url = None, meta = None, simulate = False):
             format = f
             if (f.get('width') or 0) >= 150 or (f.get('height') or 0) >= 150: break
 
+        if format is None:
+            # No storyboard/sprite format for this video — nothing to build.
+            return None
+
         if not simulate:
             image_urls = []
             if format.get('fragments'):
