@@ -395,18 +395,38 @@ class MediaDownloader:
 
 
     def thumb(self):
-        thumb_url = self.meta['thumbnail']
+        # Some extractors (redgifs among them) return no 'thumbnail' key at
+        # all; the fallbacks below still have to run in that case.
+        thumb_url = self.meta.get('thumbnail')
         video_width = self.meta.get('width')
         video_height = self.meta.get('height')
-        try:
-            download_media_file(thumb_url, os.path.join(self.data_dir, 'thumb-orig'))
-        except Exception as e:
-            pprint_exc(e)
+        if thumb_url:
+            try:
+                download_media_file(thumb_url, os.path.join(self.data_dir, 'thumb-orig'))
+            except Exception as e:
+                pprint_exc(e)
+
+        orig = check_media(url=self.url, media_type='thumb-orig')
+        if not orig and thumb_url:
+            # Retry through yt-dlp, which knows per-site auth/headers. Must
+            # write thumb-orig.%(ext)s — the default outtmpl is thumb.%(ext)s,
+            # which the lookups below would never find.
+            print('Direct thumbnail download did not succeed. Downloading using yt-dlp.')
+            try:
+                retry_opts = dict(self.ydl_opts)
+                retry_opts.update({
+                    'outtmpl': os.path.join(self.data_dir, 'thumb-orig.%(ext)s'),
+                    'writethumbnail': True,
+                    'skip_download': True,
+                })
+                YTDLP.download(self.url, retry_opts)
+            except Exception as e:
+                pprint_exc(e)
+            orig = check_media(url=self.url, media_type='thumb-orig')
 
         # Some sites serve a short animated preview where others serve a still.
         # Keep the clip as thumb.mp4 and render thumb.jpg off its first frame,
         # so <img> consumers (og:image, favicon, playlist rows) keep working.
-        orig = check_media(url=self.url, media_type='thumb-orig')
         if orig and is_video_file(orig):
             video_thumb = os.path.join(self.data_dir, 'thumb.mp4')
             try:
@@ -415,19 +435,12 @@ class MediaDownloader:
                 extract_first_frame(self.url, video_thumb, os.path.join(self.data_dir, 'thumb.jpg'))
             except Exception as e:
                 pprint_exc(e)
-        else:
+        elif orig:
             try:
-                if video_width and video_height:
-                    thumb_file = orig
-                    if not thumb_file:
-                        print('Direct thumbnail download did not succeed. Downloading using yt-dlp.')
-                        self.ydl_opts.update({'writethumbnail': True, 'skip_download': True})
-                        YTDLP.download(self.url, self.ydl_opts)
-                        thumb_file = check_media(url=self.url, media_type='thumb-orig')
+                with Image.open(orig) as im:
+                    im = im.convert("RGB")
 
-                    with Image.open(thumb_file) as im:
-                        im = im.convert("RGB")
-
+                    if video_width and video_height:
                         in_w, in_h = im.size
                         target_ar = video_width / video_height
                         if in_w / in_h > target_ar:
@@ -439,24 +452,30 @@ class MediaDownloader:
 
                         left = (in_w - new_w) // 2
                         top = (in_h - new_h) // 2
-                        right = left + new_w
-                        bottom = top + new_h
+                        im = im.crop((left, top, left + new_w, top + new_h))
+                        print("Thumbnail cropped using PIL")
+                    else:
+                        # No dimensions to crop to — a stretched thumb still
+                        # beats leaving a stray thumb-orig behind.
+                        print("Video dimensions not found in meta, saving thumbnail uncropped.")
 
-                        im = im.crop((left, top, right, bottom))
-                        im.save(os.path.join(self.data_dir, 'thumb.jpg'), quality=95)
-
-                    print(f"Thumbnail cropped using PIL")
-                    os.remove(thumb_file)
-                else:
-                    print("Video dimensions not found in meta, skipping thumbnail cropping.")
+                    im.save(os.path.join(self.data_dir, 'thumb.jpg'), quality=95)
+                os.remove(orig)
             except Exception as e:
-                print(f"Error cropping thumbnail: {e}")
+                pprint_exc(e)
 
-        # Final fallback: if we still have no thumb.jpg but a video file is
-        # already on disk, grab a frame from the middle of it with ffmpeg.
+        # Fallbacks when nothing above produced a still: grab a midpoint frame
+        # from a locally cached video file, else straight off the remote source.
         thumb_path = os.path.join(self.data_dir, 'thumb.jpg')
         if not os.path.exists(thumb_path):
             video_path = check_media(url=self.url, media_type='video')
+            if not video_path:
+                try:
+                    sources = get_video_sources(meta=self.meta, protocols=['http', 'https'])
+                    _, video_source = choose_sources_for_res(sources, self.res)
+                    if video_source: video_path = video_source[0]
+                except Exception as e:
+                    pprint_exc(e)
             if video_path:
                 extract_middle_frame(self.url, video_path, thumb_path, self.meta)
 
@@ -851,8 +870,11 @@ def send_file_partial(path, download_name: str | None = None):
     byte1, byte2 = 0, None
     
     m = re.search(r'(\d+)-(\d*)', range_header)
+    if not m:
+        # Malformed Range must not 500; just serve the whole file.
+        return send_file(path, download_name=download_name)
     g = m.groups()
-    
+
     if g[0]: byte1 = int(g[0])
     if g[1]: byte2 = int(g[1])
 
@@ -1061,17 +1083,29 @@ def check_media(url: str, media_type: str):
     print(f'Checking media for {url=} and {media_type=}')
     data_dir = get_data_dir(url)
     try:
+        match = None
         for i in os.listdir(data_dir):
             if i.endswith('.part'): continue
             if i.endswith('.ytdl'): continue
             if i.endswith('.temp'): continue
             if i.count('_') != media_type.count('_'): continue
+            if media_type == 'thumb':
+                # Prefix matching would also hit the thumb-orig.* intermediate
+                # (served to <img> consumers, possibly extension-less) and
+                # nondeterministically pick thumb.mp4 over the still.
+                if not i.startswith('thumb.'): continue
+                if match is None or i == 'thumb.jpg': match = i
+                if match == 'thumb.jpg': break
+                continue
             if i.startswith(media_type):
-                path = os.path.join(data_dir, i)
-                print(f'Serving {path}')
-                keepalive(data_dir)
-                print(f'Media for {url=} and {media_type=} found')
-                return path
+                match = i
+                break
+        if match:
+            path = os.path.join(data_dir, match)
+            print(f'Serving {path}')
+            keepalive(data_dir)
+            print(f'Media for {url=} and {media_type=} found')
+            return path
     except:
         return None
     return None
@@ -1423,6 +1457,28 @@ def get_sprite(url = None, meta = None, simulate = False):
     except Exception as e:
         pprint_exc(e)
         return None
+
+
+_VIDEO_THUMB_RE = re.compile(r'\.(mp4|webm|m4v|mov)([/?#]|$)', re.IGNORECASE)
+
+
+def pick_search_thumbnail(entry):
+    """Best image-typed thumbnail URL for a search entry, or None.
+
+    Sites that serve animated previews list them alongside stills in
+    `thumbnails`, and blindly taking `thumbnails[-1]` often lands on the
+    preview clip — which an <img> can never render."""
+    def _is_image(u):
+        return bool(u) and not _VIDEO_THUMB_RE.search(u)
+
+    thumb = entry.get('thumbnail')
+    if _is_image(thumb): return thumb
+    thumbs = entry.get('thumbnails')
+    if isinstance(thumbs, list):
+        for t in reversed(thumbs):
+            u = t.get('url') if isinstance(t, dict) else None
+            if _is_image(u): return u
+    return None
 
 
 def search(query, search_engine='auto'):

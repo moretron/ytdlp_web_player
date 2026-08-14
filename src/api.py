@@ -36,6 +36,7 @@ from addons import (
     get_video_formats,
     get_video_sources,
     normalize_url,
+    pick_search_thumbnail,
     post_media_hooks,
     preload,
 )
@@ -534,11 +535,7 @@ def api_search():
         if not u: continue
         try: u = normalize_url(u)
         except Exception: pass
-        thumb = e.get('thumbnail')
-        if not thumb:
-            thumbs = e.get('thumbnails') or []
-            if thumbs and isinstance(thumbs[-1], dict):
-                thumb = thumbs[-1].get('url')
+        thumb = pick_search_thumbnail(e)
         if not thumb and (e.get('ie_key') == 'Youtube' or 'youtube' in (e.get('extractor') or '').lower()) and e.get('id'):
             thumb = f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"
         from app import _proxy_thumb_url

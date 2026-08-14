@@ -9,22 +9,34 @@ self.addEventListener("install", (event) =>
 
 function isCacheable(request)
 {
-    return !request.url.includes("?") && !request.url.includes("hls_stream");
+    // /t/<hash> thumbnails must stay uncached: the .mp4 variants answer 206
+    // (which cache.put() rejects with a TypeError), and a cache-first still
+    // would keep serving a stale image forever after the server regenerates
+    // the thumbnail.
+    const path = new URL(request.url).pathname;
+    return !request.url.includes("?")
+        && !request.url.includes("hls_stream")
+        && !path.startsWith("/t/");
 }
 
 async function cacheFirstWithRefresh(request)
 {
     const fetchResponsePromise = fetch(request).then(async (networkResponse) =>
     {
-        if (networkResponse.ok)
+        // Only full 200 responses are cacheable; cache.put() throws on 206.
+        if (networkResponse.ok && networkResponse.status === 200)
         {
-            const cache = await caches.open(cacheName);
-            cache.put(request, networkResponse.clone());
+            try
+            {
+                const cache = await caches.open(cacheName);
+                await cache.put(request, networkResponse.clone());
+            }
+            catch (e)
+            {
+                console.warn('[Service Worker] cache.put failed:', e);
+            }
         }
         return networkResponse;
-    }).catch(error =>
-    {
-        throw error;
     });
 
     return (await caches.match(request)) || (await fetchResponsePromise);

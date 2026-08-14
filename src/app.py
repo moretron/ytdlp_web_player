@@ -195,11 +195,7 @@ def ytsearch_route():
             url = normalize_url(url)
         except Exception:
             pass
-        thumb = e.get('thumbnail')
-        if not thumb:
-            thumbs = e.get('thumbnails') or []
-            if thumbs and isinstance(thumbs, list):
-                thumb = thumbs[-1].get('url') if isinstance(thumbs[-1], dict) else None
+        thumb = pick_search_thumbnail(e)
         if not thumb and (e.get('ie_key') == 'Youtube' or 'youtube' in (e.get('extractor') or '').lower()) and e.get('id'):
             thumb = f"https://i.ytimg.com/vi/{e['id']}/mqdefault.jpg"
         results.append({
@@ -413,8 +409,9 @@ def _blank_thumb():
     than handle a failure.
 
     Upstream (59b3366) returns this unconditionally, but this fork's cards
-    rely on <img onerror> to swap in the film-icon fallback and to kick off a
-    thumbnail re-fetch. Answering 200 with a black PNG would suppress both and
+    rely on <img onerror> to swap in the film-icon fallback (the re-fetch
+    itself happens server-side when /t/<hash> misses its cache). Answering
+    200 with a black PNG would suppress the fallback and
     leave black boxes on the page, so it is only served when the caller asks
     for it with `?fallback=blank` -- useful for native clients with no error
     hook of their own.
@@ -456,13 +453,18 @@ def serve_thumbnail_by_hash(dir_hash):
         sprite_path = os.path.join(data_dir, 'sprite.jpg')
         if os.path.exists(sprite_path):
             return _serve_sprite_tile(sprite_path)
-    # Nothing cached — try to (re)fetch via the normal thumb pipeline.
+    # Nothing cached — try to (re)fetch via the normal thumb pipeline. If a
+    # download is already running, don't queue behind its lock (up to 10 min
+    # per request thread — a grid of missing thumbs would park every worker);
+    # answer 404 now and let the next page load pick up the finished file.
     url = library_db.get_url_by_hash(dir_hash)
     if url:
-        try:
-            return host_file(url, 'thumb')
-        except Exception as e:
-            pprint_exc(e)
+        in_progress = data_dir and os.path.exists(os.path.join(data_dir, 'thumb.temp'))
+        if not in_progress:
+            try:
+                return host_file(url, 'thumb')
+            except Exception as e:
+                pprint_exc(e)
     if _wants_blank_thumb():
         return _blank_thumb()
     return jsonify({"error": "no thumb or sprite"}), 404
@@ -568,6 +570,8 @@ def serve_thumb_proxy():
             '.tiktokcdn.com', '.tiktokcdn-us.com', '.rdcdn.com',
             '.redditmedia.com', '.redd.it', '.imgur.com',
             '.vimeocdn.com', '.dmcdn.net',
+            # CDNs of search prefixes shipped in ytdlp_searches.json
+            '.hdslb.com', '.sndcdn.com', '.nimg.jp', '.nicovideo.jp',
         )
         if not any(host_l == s[1:] or host_l.endswith(s) for s in allowed_suffixes):
             return _thumb_proxy_error(
@@ -581,7 +585,7 @@ def serve_thumb_proxy():
         headers['Referer'] = referer
     try:
         r = _requests.get(raw, timeout=15, stream=True, allow_redirects=True,
-                          headers=headers)
+                          headers=headers, proxies=proxies)
     except Exception as e:
         return _thumb_proxy_error(f'upstream fetch failed for {host}: '
                                   f'{type(e).__name__}: {e}', 502, raw, host=host,

@@ -484,7 +484,8 @@
                     <a class="library-thumb-link" href="/watch?url=${encodeURIComponent(r.url)}">
                         <div class="library-thumb-wrap">
                             ${r.thumbnail
-                                ? `<img loading="lazy" src="${r.thumbnail}" alt="" referrerpolicy="no-referrer">`
+                                ? `<img loading="lazy" src="${r.thumbnail}" alt="" referrerpolicy="no-referrer"
+                                       onerror="this.outerHTML='<div class=&quot;library-thumb-fallback&quot;><i class=&quot;fa-solid fa-film&quot;></i></div>'">`
                                 : `<div class="library-thumb-fallback"><i class="fa-solid fa-film"></i></div>`}
                             ${r.duration ? `<span class="library-duration">${fmtDuration(r.duration)}</span>` : ''}
                         </div>
