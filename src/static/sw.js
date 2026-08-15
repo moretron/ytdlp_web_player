@@ -1,22 +1,38 @@
-const cacheName = 'offline_cache';
+// Bump per release: old caches are deleted on activate, so stale JS/CSS
+// can't outlive a deploy.
+const CACHE_VERSION = 'v2';
+const cacheName = `offline_cache_${CACHE_VERSION}`;
 
 
 self.addEventListener("install", (event) =>
 {
     console.log('[Service Worker] Install event: Service worker installed.');
+    self.skipWaiting();
 });
 
 
+self.addEventListener("activate", (event) =>
+{
+    event.waitUntil((async () =>
+    {
+        const keys = await caches.keys();
+        await Promise.all(keys.filter(k => k !== cacheName).map(k => caches.delete(k)));
+        await self.clients.claim();
+    })());
+});
+
+
+// Cache-first is only safe for immutable-ish static assets. Everything else
+// — navigations (the server-rendered library page changes after a rebuild),
+// the JSON API (saved searches), /logs, /t/ thumbnails — must hit the network.
 function isCacheable(request)
 {
-    // /t/<hash> thumbnails must stay uncached: the .mp4 variants answer 206
-    // (which cache.put() rejects with a TypeError), and a cache-first still
-    // would keep serving a stale image forever after the server regenerates
-    // the thumbnail.
+    if (request.method !== 'GET') return false;
+    if (request.mode === 'navigate' || request.destination === 'document') return false;
+    if (!['script', 'style', 'image', 'font'].includes(request.destination)) return false;
     const path = new URL(request.url).pathname;
-    return !request.url.includes("?")
-        && !request.url.includes("hls_stream")
-        && !path.startsWith("/t/");
+    if (path.startsWith('/t/') || path.startsWith('/api/') || path.startsWith('/logs')) return false;
+    return !request.url.includes("hls_stream");
 }
 
 async function cacheFirstWithRefresh(request)

@@ -59,7 +59,7 @@ elif not ffmpeg:
 
 js_runtime = External.download_deno()
 
-ydl_global_opts = {'ffmpeg-location': ffmpeg, "noplaylist": True, 'playlistend': 0, "remote_components": ["ejs:github"], "concurrent_fragment_downloads": 2}
+ydl_global_opts = {'ffmpeg_location': ffmpeg, "noplaylist": True, 'playlistend': 0, "remote_components": ["ejs:github"], "concurrent_fragment_downloads": 2}
 if js_runtime and 'deno' not in subprocess.check_output([js_runtime, '--version']).decode(): ydl_global_opts["js_runtimes"] = {"node": {}}
 
 app_version = External.get_app_version()
@@ -109,6 +109,20 @@ def delete_old_files():
                                         f.write(str(mtime))
                                 except Exception: pass
                         if time.time() - mtime > max_video_age:
+                            # keepalive only updates on cache hits, so an
+                            # in-progress transcode/download looks idle by that
+                            # measure. Skip dirs with any recently-touched file
+                            # (ffmpeg segments, yt-dlp .part, fresh .temp lock)
+                            # instead of deleting them out from under a writer.
+                            newest = mtime
+                            for root_, _, files_ in os.walk(vid_path):
+                                for fn in files_:
+                                    try:
+                                        newest = max(newest, os.path.getmtime(os.path.join(root_, fn)))
+                                    except OSError:
+                                        pass
+                            if time.time() - newest <= max_video_age:
+                                continue
                             print(f"Deleting old directory: {vid_path}")
                             shutil.rmtree(vid_path)
         except Exception as e:

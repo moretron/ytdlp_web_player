@@ -261,8 +261,23 @@ def logs_page():
     return render_template('logs.html', app_title=app_title, theme_color=theme_color, amoled_bg=amoled_bg, log_path=log_capture.LOG_PATH)
 
 
+def _check_api_key_if_set():
+    """Root-mounted sensitive routes honor API_KEY the same way /api/v1 does —
+    previously /logs/tail served the same file the authenticated /api/v1/logs
+    protects, and /logs/clear let anyone wipe it."""
+    from api import _api_key
+    required = _api_key()
+    if not required:
+        return None
+    supplied = (request.headers.get('X-API-Key') or request.args.get('api_key') or '').strip()
+    if supplied != required:
+        return jsonify({"error": "invalid or missing X-API-Key"}), 401
+    return None
+
+
 @app.route('/logs/tail')
 def logs_tail():
+    if (err := _check_api_key_if_set()) is not None: return err
     since = request.args.get('since', type=int)
     if since is None:
         data, size = log_capture.read_tail()
@@ -275,6 +290,7 @@ def logs_tail():
 
 @app.route('/logs/clear', methods=['POST'])
 def logs_clear():
+    if (err := _check_api_key_if_set()) is not None: return err
     path = log_capture.LOG_PATH
     if not path: return jsonify({"error": "log capture not initialized"}), 500
     try:
@@ -287,6 +303,7 @@ def logs_clear():
 @app.route('/watch')
 def watch():
     print('Started serving watch')
+    if not get_url(request): return jsonify({"error": "url required"}), 400
     ydl_version = External.get_ytdlp_version()
     js_runtime_version = External.get_js_runtime_version(js_runtime)
     ffmpeg_version = External.get_ffmpeg_version(ffmpeg)
@@ -372,6 +389,7 @@ def debug_meta():
 def iframe():
     print('Started serving iframe')
     url = get_url(request)
+    if not url: return jsonify({"error": "url required"}), 400
     
     video_width = 1280
     video_height = 720
@@ -675,7 +693,9 @@ def serve_sprite():
 
 @app.route('/sb')
 def get_sponsor_segments():
-    return get_sb(get_url(request)) or []
+    url = get_url(request)
+    if not url: return jsonify({"error": "url required"}), 400
+    return get_sb(url) or []
 
 
 @app.route('/raw')
@@ -749,8 +769,21 @@ def resp_direct():
             if local and not local.endswith('.url'):
                 return send_file_partial(local)
             os.remove(media)
-            if meta_path := check_media(url, 'meta'): os.remove(meta_path)
-            MediaDownloader(url, media_type).run()
+            # Move the stale meta aside instead of deleting it, so a failed
+            # refetch can restore it and the library row keeps its backing.
+            backup = None
+            if meta_path := check_media(url, 'meta'):
+                backup = os.path.join(os.path.dirname(meta_path), 'stale-backup.json')  # must not prefix-match 'meta'
+                os.replace(meta_path, backup)
+            try:
+                MediaDownloader(url, media_type).run()
+            finally:
+                if backup:
+                    if not check_media(url, 'meta'):
+                        os.replace(backup, meta_path)
+                    else:
+                        try: os.remove(backup)
+                        except OSError: pass
             media = check_media(url, media_type)
             if media and media.endswith('.url'):
                 return stream_from_url_file(media)
@@ -761,8 +794,23 @@ def resp_direct():
 
 @app.route('/external')
 def serve_external():
+    from urllib.parse import urlparse
     url = request.args.get('url')
     if not url: return jsonify({"error": "URL parameter is required"}), 400
+    # This proxies arbitrary URLs with caller-supplied headers — restrict it
+    # to public http(s) targets so it can't be used to reach the LAN,
+    # loopback services, or cloud metadata endpoints.
+    parsed = urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        return jsonify({"error": "only http(s) URLs are allowed"}), 400
+    try:
+        import ipaddress, socket
+        addr = socket.getaddrinfo(parsed.hostname, None)[0][4][0]
+        ip = ipaddress.ip_address(addr)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return jsonify({"error": "host not allowed"}), 403
+    except (OSError, ValueError):
+        return jsonify({"error": "cannot resolve host"}), 400
     return stream_media_file(url, request.args.get('headers'), request.args.get('cookies'))
 
 
@@ -807,6 +855,10 @@ def serve_favicon():
 def serve_favicon_png(size=512):
 
     from PIL import Image
+
+    # Unbounded size was a one-request OOM (favicon99999.png → ~40 GB alloc).
+    if size < 8 or size > 1024:
+        return jsonify({"error": "size out of range"}), 400
 
     img = Image.open(os.path.join(app.static_folder, 'favicon-template.png')).convert('RGBA')
     color = tuple(int(theme_color[i:i+2], 16) / 255 for i in (1, 3, 5))
@@ -913,9 +965,16 @@ def download_hls():
 def hls_segment():
     import time as _time
     url = get_url(request)
+    if not url: return jsonify({"error": "url required"}), 400
     data_dir = get_data_dir(url)
-    quality = request.args.get('quality')
-    seg = request.args.get('seg')
+    quality = request.args.get('quality') or ''
+    seg = request.args.get('seg') or ''
+    # Both interpolate into a filesystem path — unvalidated they were an
+    # arbitrary-path read (quality=../../..).
+    if not re.fullmatch(r'audio|\d{1,4}', quality):
+        return jsonify({"error": "invalid quality"}), 400
+    if not seg.isdigit():
+        return jsonify({"error": "invalid seg"}), 400
     file = os.path.join(data_dir, f'hls_segment-{quality}/segment{seg:>0{4}}.ts')
 
     if not os.path.exists(file):

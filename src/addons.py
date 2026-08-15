@@ -86,24 +86,48 @@ class FileCachingLock:
         self.media_type = media_type
         self.data_dir = get_data_dir(url)
 
+    # A writer that died hard (container restart, OOM kill, culled PID) leaves
+    # its .temp behind; steal locks older than this instead of queueing behind
+    # them for the full 600 s wait.
+    STALE_LOCK_SECONDS = 600
+
+    def _lock_path(self):
+        return os.path.join(self.data_dir, f'{self.media_type}.temp')
+
+    def _lock_is_stale(self):
+        try:
+            age = time.time() - os.path.getmtime(self._lock_path())
+        except OSError:
+            return False  # gone between the exists-check and here — not stale, free
+        return age > self.STALE_LOCK_SECONDS
+
     def __enter__(self):
+        os.makedirs(self.data_dir, exist_ok=True)
+        lock_path = self._lock_path()
         for _ in range(600):
-            if not os.path.exists(os.path.join(self.data_dir, f'{self.media_type}.temp')):
-                break
+            if cached_media := check_media(url=self.url, media_type=self.media_type):
+                print(f'Cache hit for {self.media_type}!')
+                self.url = None
+                return cached_media
+            try:
+                # O_EXCL makes acquisition atomic across the worker processes;
+                # the old exists-then-open pattern let two workers download the
+                # same media into the same .part file.
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, 'w') as f:
+                    f.write(datetime.now().isoformat())
+                keepalive(self.data_dir)
+                return None
+            except FileExistsError:
+                if self._lock_is_stale():
+                    print(f'Stealing stale {self.media_type} lock in {self.data_dir}')
+                    try: os.remove(lock_path)
+                    except OSError: pass
+                    continue
             time.sleep(1)
             print(f'Waiting for download of {self.media_type} for {self.data_dir.split("/")[-1]}')
-        
-        if cached_media := check_media(url=self.url, media_type=self.media_type):
-            print(f'Cache hit for {self.media_type}!')
-            self.url = None
-            return cached_media
-        
-        os.makedirs(self.data_dir, exist_ok=True)
-        keepalive(self.data_dir)
-        with open(os.path.join(self.data_dir, f'{self.media_type}.temp'), 'w') as f:
-            f.write(datetime.now().isoformat())
-        
-        return None
+
+        raise TimeoutError(f'Could not acquire {self.media_type} lock for {self.data_dir}')
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self.url:
@@ -214,8 +238,12 @@ class YTDLP:
     def _ydl_runner(url, opts, with_info, arg, queue, yt_id = None):
         logger = YTDLP.Logger(url, opts, 'download', yt_id)
         try:
-            if ffmpeg: os.environ['PATH'] += os.path.dirname(ffmpeg)
-            if js_runtime: os.environ['PATH'] += os.path.dirname(js_runtime)
+            # Prepend (once, with the separator) instead of the old buggy
+            # append that concatenated without os.pathsep and grew PATH on
+            # every call.
+            for tool in (ffmpeg, js_runtime):
+                if tool and (d := os.path.dirname(tool)) and d not in os.environ['PATH'].split(os.pathsep):
+                    os.environ['PATH'] = d + os.pathsep + os.environ['PATH']
             with yt_dlp.YoutubeDL(opts | {'logger': logger}) as ydl:
                 if with_info:
                     ydl.download_with_info_file(arg)
@@ -268,7 +296,8 @@ class YTDLP:
     def get_info(url, opts):
         if (proxy): opts["proxy"] = proxy
         logger = YTDLP.Logger(url, opts, 'extract_info')
-        if js_runtime: os.environ['PATH'] += os.path.dirname(js_runtime)
+        if js_runtime and (d := os.path.dirname(js_runtime)) and d not in os.environ['PATH'].split(os.pathsep):
+            os.environ['PATH'] = d + os.pathsep + os.environ['PATH']
         try:
             with yt_dlp.YoutubeDL(json.loads(json.dumps(opts)) | {'logger': logger}) as ydl:
                 return ydl.sanitize_info(ydl.extract_info(url, download=False))
@@ -290,9 +319,12 @@ class YTDLP:
 
 
 class FFMPEG:
-    def __init__(self, url, ffmpeg_command=None):
+    def __init__(self, url, ffmpeg_command=None, affected_files=None):
         """
-        Provide ffmpeg_command to run synchronously. Check with `success`
+        Provide ffmpeg_command to run synchronously. Check with `success`.
+        `affected_files` are removed if the command fails — passing them here
+        (rather than assigning after run()) means they're also cleaned when a
+        synchronous run raises.
         """
         self._p = None
         self.pid = None
@@ -302,12 +334,16 @@ class FFMPEG:
         self.stdout = ''
         self.start_time = time.time()
         self.url = url
-        self.affected_files = []
+        self.affected_files = affected_files or []
+        self._killed = False
         if ffmpeg_command and self.ffmpeg:
             self.run(ffmpeg_command)
 
     def kill(self):
         if self._p is None: return
+        # Deliberate kill (e.g. HLS regenerate): the caller owns the output
+        # files now, so run()'s failure cleanup must not delete them.
+        self._killed = True
         Processes.rm(self.pid, kill=True)
         print(f'[FFMPEG {self.ff_id}] Killed')
 
@@ -316,8 +352,11 @@ class FFMPEG:
         Also runs synchronously, but can be placed in `Thread`
         """
         if not self.ffmpeg: return None
-        ffmpeg_command = [self.ffmpeg] + ffmpeg_command
-        ffmpeg_env = {f"{proxy.split('://')[0]}_proxy": proxy} if proxy else None
+        # -nostdin: ffmpeg reading an inherited stdin is a classic silent hang.
+        ffmpeg_command = [self.ffmpeg, '-nostdin'] + ffmpeg_command
+        # Inherit the environment — replacing it wholesale stripped PATH/HOME
+        # from ffmpeg whenever a proxy was configured.
+        ffmpeg_env = {**os.environ, f"{proxy.split('://')[0]}_proxy": proxy} if proxy else None
         print(f'[FFMPEG {self.ff_id}] Executing {ffmpeg_command}')
         self._p = subprocess.Popen(ffmpeg_command, stdout = subprocess.PIPE, stderr = subprocess.STDOUT, env=ffmpeg_env)
         self.pid = self._p.pid
@@ -334,8 +373,9 @@ class FFMPEG:
         Processes.rm(self.pid)
         if self._p.returncode != 0:
             self.success = False
-            for file in self.affected_files:
-                if os.path.exists(file): os.remove(file)
+            if not self._killed:
+                for file in self.affected_files:
+                    if os.path.exists(file): os.remove(file)
             raise RuntimeError(f'FFMPEG exited unexpectedly with return code {self._p.returncode}')
         print(f'[FFMPEG {self.ff_id}] Finished')
         self.success = True
@@ -611,19 +651,27 @@ class MediaDownloader:
             nonlocal video_file_path
             try:
                 if not video_file_path:
-                    ff = FFMPEG(self.url)
-                    ff.affected_files = [m3u8_path, temp_m3u8_path]
-                    Thread(target=ff.run, args=[ffmpeg_command]).start()
+                    ff = FFMPEG(self.url, affected_files=[m3u8_path, temp_m3u8_path])
+                    ff_thread = Thread(target=ff.run, args=[ffmpeg_command])
+                    ff_thread.start()
                     time.sleep(2)
                     video_file_path = MediaDownloader(self.url, 'audio' if 'audio' in self.media_type else f'video-{self.res}').run()
                     if not video_file_path: raise RuntimeError('Could not download video')
                     print(f'Killing FFMPEG {ff.ff_id} due to local media availability')
                     ff.kill()
+                    # The killed run() may still be unwinding in its thread;
+                    # join before renaming so its cleanup can't race the
+                    # regeneration below and delete the fresh manifest.
+                    ff_thread.join(timeout=15)
                     if os.path.exists(m3u8_path): os.rename(m3u8_path, temp_m3u8_path)
                     MediaDownloader(self.url, self.media_type).run()
                 else:
-                    ff = FFMPEG(self.url, ffmpeg_command)
-                    ff.affected_files = [m3u8_path, temp_m3u8_path]
+                    # affected_files passed in the constructor so a raising
+                    # synchronous run still cleans up the poisoned manifest —
+                    # assigning after the call never executed on failure,
+                    # leaving a manifest whose segments would never exist.
+                    ff = FFMPEG(self.url, ffmpeg_command,
+                                affected_files=[m3u8_path, temp_m3u8_path])
                     if ff.success:
                         print(f"FFMPEG Finished HLS Conversion!")
                         if os.path.exists(temp_m3u8_path): os.remove(temp_m3u8_path)
@@ -770,7 +818,7 @@ def download_media_file(url: str, path_without_ext: str, ext: str|None = None):
             headers['Referer'] = f'{p.scheme}://{p.netloc}/'
     except Exception:
         pass
-    response = requests.get(url, stream=True, proxies=proxies, headers=headers)
+    response = requests.get(url, stream=True, proxies=proxies, headers=headers, timeout=(5, 30))
     response.raise_for_status()
     if not ext:
         urlpath = url
@@ -797,7 +845,7 @@ def stream_media_file(url: str, headers: str|None = None, cookies: str|None = No
         }
         if client_range := request.headers.get('Range'):
             headers_dict['Range'] = client_range
-        response = requests.get(url, stream=True, headers=headers_dict, cookies=load_http_cookies(cookies), proxies=proxies)
+        response = requests.get(url, stream=True, headers=headers_dict, cookies=load_http_cookies(cookies), proxies=proxies, timeout=(5, 30))
         response.raise_for_status()
         mime_type = response.headers.get('Content-Type', 'application/octet-stream')
 
@@ -839,13 +887,18 @@ def stream_media_file(url: str, headers: str|None = None, cookies: str|None = No
             return resp
 
         def generate():
-            for chunk in response.iter_content(chunk_size=8192):
+            # Raw (undecoded) bytes: iter_content yields DECODED data, so on a
+            # gzipped upstream the body was longer than the forwarded
+            # Content-Length and players truncated or hung.
+            for chunk in response.raw.stream(8192, decode_content=False):
                 yield chunk
 
         resp = Response(generate(), status=response.status_code, mimetype=mime_type)
 
         if 'Content-Length' in response.headers:
             resp.headers['Content-Length'] = response.headers['Content-Length']
+        if 'Content-Encoding' in response.headers:
+            resp.headers['Content-Encoding'] = response.headers['Content-Encoding']
         if 'Content-Range' in response.headers:
             resp.headers['Content-Range'] = response.headers['Content-Range']
         resp.headers['Accept-Ranges'] = 'bytes'
@@ -857,48 +910,14 @@ def stream_media_file(url: str, headers: str|None = None, cookies: str|None = No
 
 
 def send_file_partial(path, download_name: str | None = None):
-    """ 
-        Simple wrapper around send_file which handles HTTP 206 Partial Content
-        (byte ranges)
-        TODO: handle all send_file args, mirror send_file's error handling
-        (if it has any)
-    """
-    range_header = request.headers.get('Range')
-    if not range_header: return send_file(path, download_name=download_name)
-    
-    size = os.path.getsize(path)    
-    byte1, byte2 = 0, None
-    
-    m = re.search(r'(\d+)-(\d*)', range_header)
-    if not m:
-        # Malformed Range must not 500; just serve the whole file.
-        return send_file(path, download_name=download_name)
-    g = m.groups()
-
-    if g[0]: byte1 = int(g[0])
-    if g[1]: byte2 = int(g[1])
-
-    # `bytes=a-b` is inclusive of b, so the run is b - a + 1 bytes long. A
-    # client asking for the last byte (`bytes=n-n`) must get one byte back,
-    # not zero. Clamp to EOF so an over-long end doesn't claim more than we
-    # have in Content-Range.
-    length = size - byte1
-    if byte2 is not None:
-        length = max(0, min(byte2 - byte1 + 1, size - byte1))
-
-    data = None
-    with open(path, 'rb') as f:
-        f.seek(byte1)
-        data = f.read(length)
-
-    rv = Response(data, 
-        206,
-        mimetype=mimetypes.guess_type(path)[0], 
-        direct_passthrough=True)
-    rv.headers.add('Content-Range', 'bytes {0}-{1}/{2}'.format(byte1, byte1 + length - 1, size))
-
-    return rv
-
+    """Range-aware file responder. Werkzeug's conditional mode implements
+    206/416/If-Range and streams via the WSGI file wrapper — the previous
+    hand-rolled version read the entire requested range into memory, which
+    for a player's opening `Range: bytes=0-` request meant buffering whole
+    multi-GB videos per client."""
+    mimetype = mimetypes.guess_type(path)[0] or 'application/octet-stream'
+    return send_file(path, download_name=download_name, mimetype=mimetype,
+                     conditional=True)
 
 
 def host_file(url: str, media_type='video', download_name: str | None = None):
@@ -1053,9 +1072,18 @@ def get_media_res(url, meta, media):
     raise RuntimeError('Media resolution impossible to gather - report this bug')
 
 
-def pprint_exc(e, code = 500):
+def pprint_exc(e, code = None):
     error = (re.sub(r'[^\x20-\x7e]',r'', re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", str(e))))
     traceback.print_exception(e)
+    if code is None:
+        # Domain errors ("Video too long", bad URL) are the caller's fault,
+        # not a server fault — a blanket 500 made clients retry permanent
+        # failures and buried the reason.
+        if isinstance(e, (ValueError, TypeError)): code = 400
+        elif isinstance(e, FileNotFoundError): code = 404
+        elif isinstance(e, NotImplementedError): code = 501
+        elif isinstance(e, TimeoutError): code = 503
+        else: code = 500
     return error, code
 
 
@@ -1064,6 +1092,9 @@ def gen_pathname(url: str):
 
 
 def get_data_dir(url):
+    # None-safe: routes called without a url used to blow up with an
+    # AttributeError deep inside sha1() instead of a clean 400.
+    if not url: return None
     return library_db.data_dir_for(url)
 
 
@@ -1082,6 +1113,8 @@ def keepalive(data_dir):
 def check_media(url: str, media_type: str):
     print(f'Checking media for {url=} and {media_type=}')
     data_dir = get_data_dir(url)
+    # os.listdir(None) would list the CWD — a missing url must mean "no media".
+    if not data_dir: return None
     try:
         match = None
         for i in os.listdir(data_dir):
@@ -1153,14 +1186,27 @@ def get_meta(url: str):
                         json.dump(meta, f)
                     print('Metadata still valid')
                 return meta
+            except (ConnectionError, requests.exceptions.RequestException, OSError) as e:
+                # Transient network failure during revalidation: the cached
+                # meta is still the best information we have. Returning it
+                # beats regenerating — and infinitely beats the old behavior,
+                # which wiped EVERY file in the cache dir (downloaded videos,
+                # cookies, other media types' in-flight lock files included).
+                pprint_exc(e)
+                try:
+                    print('Meta revalidation failed (network); using cached meta as-is')
+                    return meta
+                except UnboundLocalError:
+                    # The failure was reading the file itself — fall through
+                    # to regeneration, dropping only the meta file.
+                    try: os.remove(cache)
+                    except OSError: pass
             except Exception as e:
                 pprint_exc(e)
                 print('Meta file invalid - Regenerating...')
-                data_dir = get_data_dir(url)
-                for file in os.listdir(data_dir):
-                    if os.path.isdir(os.path.join(data_dir, file)): continue
-                    try: os.remove(os.path.join(data_dir, file))
-                    except: pass
+                # Only the meta itself is suspect; never touch sibling files.
+                try: os.remove(cache)
+                except OSError: pass
         print(f'downloading meta for {url}')
         ydl_opts = {'skip_download': True}
         ydl_opts.update(ydl_global_opts)
@@ -1288,7 +1334,7 @@ def generate_hls(audio_source, video_source):
 def generate_dash(audio_source, video_source, duration):
     def get_mp4_dash_ranges(source):
         headers_dict = json.loads(source[1]) | {"Range": "bytes=0-60000"}
-        response = requests.get(source[0], headers=headers_dict, cookies=load_http_cookies(source[2]), proxies=proxies)
+        response = requests.get(source[0], headers=headers_dict, cookies=load_http_cookies(source[2]), proxies=proxies, timeout=(5, 30))
         response.raise_for_status()
         data = response.content
         offset = 0
@@ -1436,7 +1482,7 @@ def get_sprite(url = None, meta = None, simulate = False):
             height = 0
 
             for i, img_url in enumerate(image_urls):
-                response = requests.get(img_url, proxies=proxies)
+                response = requests.get(img_url, proxies=proxies, timeout=(5, 30))
                 response.raise_for_status()
                 img = Image.open(io.BytesIO(response.content))
 

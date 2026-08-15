@@ -17,7 +17,7 @@ class SponsorBlock:
         
         try:
             params = {"videoID" : self.video_id, "category" : self.categories}
-            response = requests.get(self.url, params=params)
+            response = requests.get(self.url, params=params, timeout=(5, 15))
             
             self.segments = []
             

@@ -196,7 +196,7 @@
                                                onmouseenter="this.play()" onmouseleave="this.pause(); this.currentTime = 0;"></video>
                                     {% elif e.has_thumb %}
                                         <img loading="lazy" src="/t/{{ e.dir_hash }}" alt=""
-                                             onerror="this.remove(); this.parentElement.insertAdjacentHTML('afterbegin', '<div class=&quot;library-thumb-fallback&quot;><i class=&quot;fa-solid fa-film&quot;></i></div>');">
+                                             onerror="this.outerHTML = '<div class=&quot;library-thumb-fallback&quot;><i class=&quot;fa-solid fa-film&quot;></i></div>';">
                                     {% else %}
                                         <div class="library-thumb-fallback"><i class="fa-solid fa-film"></i></div>
                                     {% endif %}
@@ -658,8 +658,10 @@
                 const raw = (card.getAttribute(FILTER_ATTR[type]) || '');
                 if (!raw) return false;
                 const set = new Set(raw.split('|').filter(Boolean));
-                for (const n of needed) if (!set.has(n)) return false;
-                return true;
+                // OR within a facet, AND across facets: a card has exactly one
+                // site, so requiring ALL selected sites could never match.
+                for (const n of needed) if (set.has(n)) return true;
+                return false;
             }
 
             function refreshChipStates() {
@@ -842,20 +844,23 @@
             }
 
             const rebuildBtn = document.getElementById('rebuild');
+            let rebuildInFlight = false;   // `disabled` is meaningless on an <a>
             rebuildBtn.addEventListener('click', async () => {
+                if (rebuildInFlight) return;
+                rebuildInFlight = true;
                 const originalHTML = rebuildBtn.innerHTML;
-                rebuildBtn.disabled = true;
                 rebuildBtn.innerHTML = '<i class="fa-solid fa-rotate fa-spin"></i> Rebuilding';
                 try {
                     const resp = await fetch('/library/rebuild', { method: 'POST' });
                     if (!resp.ok) throw new Error(await resp.text());
                     const data = await resp.json();
                     rebuildBtn.innerHTML = '<i class="fa-solid fa-check"></i> ' + data.count + ' indexed';
-                    setTimeout(() => window.location.reload(), 700);
+                    // Cache-bypassing reload so the fresh library actually shows.
+                    setTimeout(() => location.replace(location.pathname + '?t=' + Date.now()), 700);
                 } catch (e) {
                     alert('Rebuild failed: ' + e.message);
                     rebuildBtn.innerHTML = originalHTML;
-                    rebuildBtn.disabled = false;
+                    rebuildInFlight = false;
                 }
             });
 

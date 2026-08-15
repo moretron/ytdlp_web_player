@@ -94,6 +94,12 @@ def _connect():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # 4 worker processes write concurrently (sync_url fires after every media
+    # operation). Default journaling made one writer block all readers and
+    # surfaced as 'database is locked' 500s during rebuilds.
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA busy_timeout = 10000")
     return conn
 
 
@@ -124,6 +130,8 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_source_site ON videos(source_site)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_saved_at ON videos(saved_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_hidden ON videos(hidden)")
+        # /t/<hash> resolves via dir_hash on every thumbnail tile.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_dir_hash ON videos(dir_hash)")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS hidden_sites (
                 name TEXT PRIMARY KEY

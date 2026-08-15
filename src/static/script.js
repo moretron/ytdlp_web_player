@@ -9,7 +9,9 @@ let repeatEndTime = 0;
 let minBufferAheadTime = 0;
 let isBuffering = false;
 let usesHls = false;
+let segments = [];
 let ongoingRequest = null;
+let keepaliveInterval = null;
 let audioContext = null;
 let audioSource = null;
 
@@ -23,7 +25,7 @@ class PlayerState
         this.switchTime = 0;
         this.isPlaying = false;
         this.speed = 1;
-        this.tracks = null;
+        this.tracks = [];
         this.suspend = false;
     }
     save()
@@ -31,7 +33,7 @@ class PlayerState
         if (this.ongoing && player.currentTime() == 0)
         {
             console.warn('Preventing saving unknown player state');
-            return;
+            return false;
         }
         this.ongoing = false;
         this.switchTime = player.currentTime();
@@ -51,17 +53,35 @@ class PlayerState
                 mode: track.mode
             });
         }
+        return true;
     }
     apply()
     {
-        if (this.switchTime > 0) player.currentTime(this.switchTime);
-        player.playbackRate(this.speed);
-        if (this.isPlaying) player.play();
-        for (let i = 0; i < this.tracks.length; i++)
+        // src() is asynchronous — seeking before the new source has metadata
+        // is dropped by the tech, which is why quality switches sometimes
+        // restarted from 0:00. Defer the restore to loadedmetadata.
+        const restore = () =>
         {
-            const track = this.tracks[i];
-            if (track.kind == 'subtitles') player.addRemoteTextTrack(track);
-        }
+            if (this.switchTime > 0) player.currentTime(this.switchTime);
+            player.playbackRate(this.speed);
+            if (this.isPlaying) player.play();
+            const existing = new Set();
+            const textTracks = player.textTracks();
+            for (let i = 0; i < textTracks.length; i++)
+            {
+                if (textTracks[i].src) existing.add(textTracks[i].src);
+            }
+            for (const track of this.tracks || [])
+            {
+                if (track.kind != 'subtitles' || existing.has(track.src)) continue;
+                const added = player.addRemoteTextTrack(track, false);
+                // addRemoteTextTrack ignores `mode`, which silently disabled
+                // the user's selected subtitles after every quality switch.
+                if (added && added.track) added.track.mode = track.mode;
+            }
+        };
+        if (player.readyState() >= 1) restore();
+        else player.one('loadedmetadata', restore);
         this.ongoing = true;
     }
 }
@@ -246,9 +266,19 @@ function displayPlayerError(message)
     errorDisplay.innerHTML = message;
     errorDisplay.classList.remove('spinner-parent');
     errorDisplay.classList.remove('vjs-hidden');
+    // Stop the periodic work before nulling the player — these intervals
+    // dereference `player` on their next tick otherwise.
+    clearInterval(keepaliveInterval);
+    clearInterval(ongoingRequest);
+    ongoingRequest = null;
+    stopCacheStatusPolling();
     player.src({ src: 'null', type: 'null' });
     player = null;
 }
+window.addEventListener('pagehide', () => {
+    clearInterval(keepaliveInterval);
+    stopCacheStatusPolling();
+});
 
 
 function loadChapters()
@@ -377,6 +407,7 @@ function stopCacheStatusPolling()
 // browser's own buffered ranges.
 async function updateCacheStatusBar()
 {
+    if (document.hidden) return;
     try
     {
         const url = getUrlInfo();
@@ -402,7 +433,10 @@ async function updateCacheStatusBar()
             holder.appendChild(bar);
         }
         bar.style.width = `${Math.min(100, frac * 100)}%`;
-        if (frac >= 1) stopCacheStatusPolling();
+        // Livestreams grow manifest and segments together, so done/total
+        // transiently hits 1.0 — never auto-stop for them.
+        const isLive = info && parseFloat(info.duration) === 0;
+        if (frac >= 1 && !isLive) stopCacheStatusPolling();
     }
     catch (e) {}
 }
@@ -414,7 +448,7 @@ function applyVideoQuality()
 
     const videoEl = player.el_.querySelector('video');
     const posterEl = player.el_.querySelector('.vjs-poster');
-    ps.save();
+    const savedOk = ps.save();
     if (ps.suspend) return;
     if (player.src() == videoSource[0])
     {
@@ -422,7 +456,7 @@ function applyVideoQuality()
         return;
     }
     player.src({ src: videoSource[0], type: videoSource[1] });
-    ps.apply();
+    if (savedOk) ps.apply();
     startCacheStatusPolling();
 
     if (url.quality === 'audio')
@@ -493,35 +527,37 @@ function setVideoQuality(height = null, button = null)
     if (usesHls)
     {
         console.log('Fetching HLS...');
+        // A per-switch token instead of setInterval: each /hls_segment probe
+        // can block for 15+ seconds server-side, so a fixed 2 s interval
+        // stacked up to ~8 concurrent probes against a transcoding server.
+        // The self-rescheduling loop guarantees one in flight at a time.
+        const token = {};
+        ongoingRequest = token;
         retryFetch(getVideoSource()[0])
             .then(response => response.text())
-            .then(playlist => {
-                let requestCount = 0;
-                clearInterval(ongoingRequest);
-                ongoingRequest = setInterval(() => {
-                    requestCount ++;
-                    if (requestCount > 30) clearInterval(ongoingRequest);
-                    pingHlsSegment(height)
-                        .then(success => {
-                            if (success)
-                            {
-                                clearInterval(ongoingRequest);
-                                applyVideoQuality();
-                                buttons.forEach(btn => btn.classList.remove('vjs-menu-option-selected'));
-                                button?.classList?.add('vjs-menu-option-selected');
-                            }
-                            else
-                            {
-                                console.log('HLS not ready. Retrying fetching...');
-                            }
-                    });
-                }, 2000);
+            .then(async playlist => {
+                for (let attempt = 0; attempt < 30; attempt++)
+                {
+                    if (ongoingRequest !== token) return;   // superseded
+                    let success = false;
+                    try { success = await pingHlsSegment(height); } catch (e) {}
+                    if (ongoingRequest !== token) return;
+                    if (success)
+                    {
+                        applyVideoQuality();
+                        buttons.forEach(btn => btn.classList.remove('vjs-menu-option-selected'));
+                        button?.classList?.add('vjs-menu-option-selected');
+                        return;
+                    }
+                    console.log('HLS not ready. Retrying fetching...');
+                    await new Promise(r => setTimeout(r, 2000));
+                }
         });
     }
     else
     {
         console.log('Fetching Direct...');
-        retryFetch(getVideoSource()[0], 2, undefined, undefined, undefined, true)
+        retryFetch(getVideoSource()[0], {}, 2, undefined, undefined, true)
             .then(response => {
                 applyVideoQuality();
                 buttons.forEach(btn => btn.classList.remove('vjs-menu-option-selected'));
@@ -1573,7 +1609,7 @@ function checkSponsorTime()
         if (currentTime > segment.start - 1 && currentTime < segment.start)
         {
             setTimeout(() => {
-                if (!player.paused) checkSponsorTime();
+                if (!player.paused()) checkSponsorTime();
             }, (segment.start - currentTime + .01) * 1000 / player.playbackRate());
         }
     });
@@ -1585,7 +1621,7 @@ function checkSponsorTime()
 
         if ( "mediaSession" in navigator)
         {
-            navigator.mediaSession.metadata.artist = info.uploader;
+            if (navigator.mediaSession.metadata) navigator.mediaSession.metadata.artist = info.uploader;
             navigator.mediaSession.setActionHandler("nexttrack", null);
             navigator.mediaSession.setActionHandler("skipad", null);
         }
@@ -1605,7 +1641,7 @@ function checkSponsorTime()
 
         if ( "mediaSession" in navigator)
         {
-            navigator.mediaSession.metadata.artist = info.uploader + `    [${segmentShown.category.replaceAll('_', ' ')}]`;
+            if (navigator.mediaSession.metadata) navigator.mediaSession.metadata.artist = info.uploader + `    [${segmentShown.category.replaceAll('_', ' ')}]`;
             navigator.mediaSession.setActionHandler("nexttrack", () => {
                 skipclick();
             });
@@ -1729,7 +1765,7 @@ function loadVideo()
         },
     });
     player.doubleTapFF();
-    player.controlBar.ZoomToFillToggle.handleClick(null, state = false);
+    player.controlBar.ZoomToFillToggle.handleClick(null, false);
     if (window.location.href.includes('/iframe?')) player.controlBar.addChild('PlayerButton');
     
     const spacer = document.createElement('div');
@@ -1936,7 +1972,13 @@ function loadVideo()
                     });
             }
 
-            setInterval(()=>{ retryFetch(getVideoSource()[0], {}, 0, undefined, false, true).then(response => response.ok); }, 120000); // Keepalive
+            // Keepalive: keep a handle so error/pagehide can stop it; skip
+            // pings while backgrounded and paused (nothing to keep alive).
+            keepaliveInterval = setInterval(()=>{
+                if (player == null) { clearInterval(keepaliveInterval); return; }
+                if (document.hidden && player.paused()) return;
+                retryFetch(getVideoSource()[0], {}, 0, undefined, false, true).then(response => response?.ok).catch(() => {});
+            }, 120000);
 
             if (info.auto_bg_playback && navigator?.userAgentData?.mobile)
             {
@@ -2003,7 +2045,7 @@ function loadVideo()
 
 function loadMediaSession()
 {
-    if (! "mediaSession" in navigator) return;
+    if (!('mediaSession' in navigator)) return;
 
     var url = getUrlInfo();
     navigator.mediaSession.metadata = new MediaMetadata({

@@ -399,8 +399,19 @@ def video_streams():
                 except Exception:
                     is_flat_stub = True
                 if is_flat_stub:
-                    os.remove(meta_path)
-                    formats = get_video_formats(url)
+                    # Move aside rather than delete: if the refetch fails
+                    # (site down, cookies needed) the stub still backs the
+                    # library row and /watch.
+                    backup = os.path.join(os.path.dirname(meta_path), 'stub-backup.json')  # must not prefix-match 'meta'
+                    os.replace(meta_path, backup)
+                    try:
+                        formats = get_video_formats(url)
+                    finally:
+                        if not os.path.exists(meta_path):
+                            os.replace(backup, meta_path)
+                        else:
+                            try: os.remove(backup)
+                            except OSError: pass
     except Exception as e:
         return _err(str(e), 500)
     enc = quote_plus(url)
