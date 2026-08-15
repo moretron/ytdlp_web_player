@@ -1818,3 +1818,18 @@ body.library-body
     margin: 0;
     background-color: transparent;
 }
+
+/* Server-side cache progress (how much yt-dlp/ffmpeg has ready), rendered as
+   a thin strip under the seekbar — distinct from the browser buffer. */
+.vjs-progress-holder .server-cache-bar
+{
+    position: absolute;
+    bottom: -4px;
+    left: 0;
+    height: 3px;
+    width: 0;
+    background: rgba(255, 255, 255, 0.55);
+    border-radius: 2px;
+    pointer-events: none;
+    transition: width 0.4s ease;
+}

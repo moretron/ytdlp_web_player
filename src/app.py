@@ -854,6 +854,51 @@ def serve_extension():
     return Response(extension, mimetype='text/javascript')
 
 
+@app.route('/cache_status')
+def cache_status():
+    """How much of a stream the server has cached, for progress UI.
+
+    HLS: the manifest is written in full up front while ffmpeg fills the
+    segment directory behind it, so segments-on-disk vs #EXTINF entries is an
+    exact measure of transcode progress. Files: presence/size of the
+    downloaded media (a *.part shows in-flight yt-dlp downloads).
+    Read-only — never triggers a download."""
+    try:
+        url = get_url(request)
+        if not url: return jsonify({"error": "URL parameter is required"}), 400
+        res = (request.args.get('quality') or '').strip()
+        data_dir = get_data_dir(url)
+        out = {}
+        if os.path.isdir(data_dir):
+            hls_name = f'hls-{res}'.removesuffix('-')
+            m3u8 = os.path.join(data_dir, f'{hls_name}.m3u8')
+            if os.path.exists(m3u8):
+                with open(m3u8, 'r') as f:
+                    total = f.read().count('#EXTINF')
+                seg_dir = os.path.join(data_dir, f'hls_segment-{res or "audio"}')
+                done = 0
+                if os.path.isdir(seg_dir):
+                    done = sum(1 for s in os.listdir(seg_dir) if s.endswith('.ts'))
+                out['hls'] = {'done': done, 'total': total}
+            file_name = 'audio' if res == 'audio' else (f'video-{res}' if res else 'video')
+            for i in os.listdir(data_dir):
+                if not i.startswith(file_name): continue
+                path = os.path.join(data_dir, i)
+                if i.endswith('.part'):
+                    out.setdefault('file', {'bytes': os.path.getsize(path), 'complete': False})
+                elif not i.endswith(('.ytdl', '.temp')):
+                    out['file'] = {'bytes': os.path.getsize(path), 'complete': True}
+                    break
+            try:
+                with open(os.path.join(data_dir, 'meta.json'), 'r') as f:
+                    out['duration'] = json.load(f).get('duration')
+            except Exception:
+                pass
+        return jsonify(out), 200
+    except Exception as e:
+        return pprint_exc(e)
+
+
 @app.route('/hls')
 def download_hls():
     try:

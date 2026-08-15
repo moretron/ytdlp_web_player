@@ -358,6 +358,55 @@ function getVideoSource()
 }
 
 
+let cacheStatusTimer = null;
+
+function startCacheStatusPolling()
+{
+    stopCacheStatusPolling();
+    cacheStatusTimer = setInterval(updateCacheStatusBar, 5000);
+    updateCacheStatusBar();
+}
+
+function stopCacheStatusPolling()
+{
+    if (cacheStatusTimer) { clearInterval(cacheStatusTimer); cacheStatusTimer = null; }
+}
+
+// Thin bar under the seekbar showing how much the SERVER has cached
+// (transcoded HLS segments / finished download) — distinct from the
+// browser's own buffered ranges.
+async function updateCacheStatusBar()
+{
+    try
+    {
+        const url = getUrlInfo();
+        const resp = await fetch(`/cache_status?url=${url.encodedUrl}&quality=${url.quality || ''}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        let frac = null;
+        if (usesHls && data.hls && data.hls.total > 0) frac = data.hls.done / data.hls.total;
+        else if (data.file) frac = data.file.complete ? 1 : null;
+        const holder = document.querySelector('.vjs-progress-holder');
+        if (!holder) return;
+        let bar = holder.querySelector('.server-cache-bar');
+        if (frac === null)
+        {
+            if (bar) bar.remove();
+            return;
+        }
+        if (!bar)
+        {
+            bar = document.createElement('div');
+            bar.className = 'server-cache-bar';
+            bar.title = 'Cached on server';
+            holder.appendChild(bar);
+        }
+        bar.style.width = `${Math.min(100, frac * 100)}%`;
+        if (frac >= 1) stopCacheStatusPolling();
+    }
+    catch (e) {}
+}
+
 function applyVideoQuality()
 {
     var url = getUrlInfo();
@@ -374,6 +423,7 @@ function applyVideoQuality()
     }
     player.src({ src: videoSource[0], type: videoSource[1] });
     ps.apply();
+    startCacheStatusPolling();
 
     if (url.quality === 'audio')
     {

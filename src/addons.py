@@ -1535,7 +1535,14 @@ def flat_search(query, start=None, end=None):
     entries = info.get('entries') or []
 
     if _SEARCH_CACHE_TTL:
-        _SEARCH_CACHE[cache_key] = (now + _SEARCH_CACHE_TTL, entries)
+        # A windowed fetch that comes back short is either the true tail of
+        # the result set or a transient extractor failure (site page fetch
+        # died mid-walk). We can't tell which, so cache it only briefly —
+        # otherwise one hiccup pins a 4-item "page" for the full TTL.
+        ttl = _SEARCH_CACHE_TTL
+        if window and end and len(entries) < (end - (start or 1) + 1):
+            ttl = min(60, _SEARCH_CACHE_TTL)
+        _SEARCH_CACHE[cache_key] = (now + ttl, entries)
         # Evict expired, then cap to _SEARCH_CACHE_MAX (drop oldest).
         for k in [k for k, (exp, _) in _SEARCH_CACHE.items() if exp <= now]:
             _SEARCH_CACHE.pop(k, None)
