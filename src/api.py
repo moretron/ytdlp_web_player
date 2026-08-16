@@ -56,6 +56,10 @@ def _auth_and_preflight():
     # Preflight always OK; CORS headers added by _cors_headers below.
     if request.method == 'OPTIONS':
         return ('', 204)
+    # /health stays open even with API_KEY set: it's the discovery beacon and
+    # exposes only the app marker, title, and version.
+    if request.endpoint == 'api.health':
+        return None
     required = _api_key()
     if not required:
         return None
@@ -144,7 +148,15 @@ def _multi(name):
 
 @bp.route('/health', methods=['GET', 'OPTIONS'])
 def health():
-    return jsonify({"ok": True, "version": _app_version()}), 200
+    from main import app_title
+    # `app` is a discovery marker: LAN clients sweep the subnet for port 5000
+    # and need to distinguish this server from any other service that answers.
+    return jsonify({
+        "ok": True,
+        "app": "ytdlp_web_player",
+        "title": app_title,
+        "version": _app_version(),
+    }), 200
 
 
 def _app_version():
