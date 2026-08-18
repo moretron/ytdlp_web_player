@@ -426,6 +426,13 @@ def _has_media(vid_dir):
                     return True
         except OSError:
             pass
+    # A direct-* redirect file means playback actually started through the
+    # proxied direct path — the app's default. No bytes are cached locally,
+    # but for the library-as-history it absolutely counts: without this,
+    # videos watched from the TV/mobile app never appeared at all.
+    for f in files:
+        if f.startswith('direct-') and f.endswith('.url'):
+            return True
     return False
 
 
