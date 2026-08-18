@@ -531,6 +531,9 @@
                     renderSavedSearches(data.saved_searches || []);
                 } catch (e) { /* silent */ }
             }
+            // Replace the server-rendered rows right away: the JS-rendered
+            // version carries the reorder arrows.
+            reloadSavedSearches();
 
             function renderSavedSearches(items) {
                 const list = document.getElementById('saved-searches-list');
@@ -541,11 +544,17 @@
                     list.innerHTML = '<span class="sidebar-empty" style="color: var(--theme-fg); font-size: 12px; opacity: 0.6;">None yet — star a search or paste queries below.</span>';
                     return;
                 }
-                list.innerHTML = items.map(s => `
+                list.innerHTML = items.map((s, i) => `
                     <span class="chip-wrap">
                         <a class="chip chip-saved-search" href="/search?q=${encodeURIComponent(s.query)}" data-query="${escapeHtml(s.query)}">
                             <i class="fa-solid fa-magnifying-glass" style="opacity:0.6;margin-right:4px;font-size:11px;"></i>${escapeHtml(s.query)}
                         </a>
+                        <button class="chip-hide-toggle saved-search-move" data-query="${escapeHtml(s.query)}" data-dir="up" title="Move up" ${i === 0 ? 'disabled style="opacity:0.3;"' : ''}>
+                            <i class="fa-solid fa-chevron-up"></i>
+                        </button>
+                        <button class="chip-hide-toggle saved-search-move" data-query="${escapeHtml(s.query)}" data-dir="down" title="Move down" ${i === items.length - 1 ? 'disabled style="opacity:0.3;"' : ''}>
+                            <i class="fa-solid fa-chevron-down"></i>
+                        </button>
                         <button class="chip-hide-toggle saved-search-remove" data-query="${escapeHtml(s.query)}" title="Remove saved search">
                             <i class="fa-solid fa-xmark"></i>
                         </button>
@@ -554,7 +563,36 @@
                 wireSavedSearchButtons();
             }
 
+            async function moveSavedSearch(query, dir) {
+                const order = Array.from(
+                    document.querySelectorAll('#saved-searches-list .chip-saved-search')
+                ).map(a => a.dataset.query);
+                const i = order.indexOf(query);
+                const j = dir === 'up' ? i - 1 : i + 1;
+                if (i < 0 || j < 0 || j >= order.length) return;
+                [order[i], order[j]] = [order[j], order[i]];
+                try {
+                    const resp = await fetch('/api/v1/saved-searches/reorder', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ queries: order }),
+                    });
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                    const data = await resp.json();
+                    renderSavedSearches(data.saved_searches || []);
+                } catch (e) {
+                    console.error('reorder failed', e);
+                }
+            }
+
             function wireSavedSearchButtons() {
+                document.querySelectorAll('.saved-search-move').forEach(btn => {
+                    btn.onclick = (ev) => {
+                        ev.preventDefault();
+                        if (btn.disabled) return;
+                        moveSavedSearch(btn.dataset.query, btn.dataset.dir);
+                    };
+                });
                 document.querySelectorAll('.saved-search-remove').forEach(btn => {
                     btn.onclick = async (ev) => {
                         ev.preventDefault();

@@ -178,14 +178,38 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_searches_added_at ON saved_searches(added_at)")
+        # User-defined ordering; NULL means "never manually ordered".
+        try:
+            conn.execute("ALTER TABLE saved_searches ADD COLUMN position INTEGER")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 def list_saved_searches():
+    """Manual order first (position ASC); unordered entries follow, newest
+    first. Clients render in response order, so the custom order carries to
+    the web sidebar and the TV app alike."""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT query, added_at FROM saved_searches ORDER BY added_at DESC"
+            "SELECT query, added_at FROM saved_searches "
+            "ORDER BY position IS NULL, position ASC, added_at DESC"
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def reorder_saved_searches(queries):
+    """Persist an explicit ordering: position = index in `queries`. Entries
+    not mentioned keep NULL and sort after the ordered ones."""
+    cleaned = [q.strip() for q in (queries or []) if q and q.strip()]
+    if not cleaned:
+        return 0
+    with _connect() as conn:
+        updated = 0
+        for i, q in enumerate(cleaned):
+            cur = conn.execute(
+                "UPDATE saved_searches SET position = ? WHERE query = ?", (i, q))
+            updated += cur.rowcount
+    return updated
 
 
 def add_saved_search(query):

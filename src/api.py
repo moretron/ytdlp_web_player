@@ -667,6 +667,19 @@ def api_saved_searches_add():
     return jsonify({"added": added, "skipped": skipped, "errors": errors}), status
 
 
+@bp.route('/saved-searches/reorder', methods=['POST', 'OPTIONS'])
+def api_saved_searches_reorder():
+    """Persist a user-chosen ordering. Body: {"queries": ["q1", "q2", ...]}
+    (JSON) — position becomes the index. Entries not listed sort after."""
+    body = request.get_json(silent=True) or {}
+    queries = body.get('queries')
+    if not isinstance(queries, list) or not queries:
+        return _err("queries (non-empty list) required")
+    updated = library_db.reorder_saved_searches([str(q) for q in queries])
+    return jsonify({"ok": True, "updated": updated,
+                    "saved_searches": library_db.list_saved_searches()}), 200
+
+
 @bp.route('/saved-searches', methods=['DELETE', 'OPTIONS'])
 def api_saved_searches_remove():
     q = (request.args.get('q') or request.form.get('q') or '').strip()
