@@ -732,6 +732,23 @@ def download_low_quality():
         return pprint_exc(e)
 
 
+def _direct_manifest_expired(path):
+    """True when a cached direct-*.m3u8's signed source URLs have lapsed.
+    googlevideo embeds the expiry as `expire/<unix>` (path style) or
+    `expire=<unix>`; inside our /external?url=... rewrites those arrive
+    percent-encoded. Fall back to a 4 h mtime bound when no stamp is found."""
+    import time as _time
+    try:
+        with open(path, 'r') as f:
+            text = f.read(65536)
+        m = re.search(r'expire(?:=|%3D|/|%2F)(\d{10})', text)
+        if m:
+            return int(m.group(1)) < _time.time() + 60
+        return _time.time() - os.path.getmtime(path) > 4 * 3600
+    except OSError:
+        return True
+
+
 @app.route('/direct')
 def resp_direct():
     try:
@@ -746,31 +763,12 @@ def resp_direct():
             if isinstance(resp, tuple): return resp[1]
             return getattr(resp, 'status_code', 200)
 
-        media = check_media(url, media_type)
-        if not media:
-            # Build the redirect file, then fall through to the streaming
-            # branch below. host_file() would send the just-written .url text
-            # file itself, which players fail on instantly — only a client
-            # that happened to warm the cache with an extra request ever hit
-            # the correct path.
-            MediaDownloader(url, media_type).run()
-            media = check_media(url, media_type)
-        if media and media.endswith('.url'):
-            resp = stream_from_url_file(media)
-            if resp_status(resp) < 400:
-                return resp
-            # The CDN URL inside the redirect file carries a signed expiry;
-            # once it lapses the CDN refuses (e.g. 472) and this file is dead
-            # weight. Prefer any locally cached copy, else force a fresh meta
-            # (the stale source came from it) and rebuild once.
-            print(f'Stale redirect file {media}, self-healing')
-            local = (check_media(url, f'video-{res}') if res else None) \
-                or check_media(url, 'audio' if res == 'audio' else 'video')
-            if local and not local.endswith('.url'):
-                return send_file_partial(local)
-            os.remove(media)
-            # Move the stale meta aside instead of deleting it, so a failed
-            # refetch can restore it and the library row keeps its backing.
+        def rebuild_with_fresh_meta(stale_media):
+            """Drop the stale direct file, refetch meta (moved aside so a
+            failed refetch restores it and the library row keeps its
+            backing), and rebuild the direct source."""
+            try: os.remove(stale_media)
+            except OSError: pass
             backup = None
             if meta_path := check_media(url, 'meta'):
                 backup = os.path.join(os.path.dirname(meta_path), 'stale-backup.json')  # must not prefix-match 'meta'
@@ -784,7 +782,37 @@ def resp_direct():
                     else:
                         try: os.remove(backup)
                         except OSError: pass
+            return check_media(url, media_type)
+
+        media = check_media(url, media_type)
+        if not media:
+            # Build the redirect file, then fall through to the streaming
+            # branch below. host_file() would send the just-written .url text
+            # file itself, which players fail on instantly — only a client
+            # that happened to warm the cache with an extra request ever hit
+            # the correct path.
+            MediaDownloader(url, media_type).run()
             media = check_media(url, media_type)
+        if media and media.endswith('.m3u8') and _direct_manifest_expired(media):
+            # YouTube-style sources store a rewritten HLS manifest whose
+            # googlevideo URLs carry a ~6 h signed expiry. Serving it stale
+            # means every segment 403s — cached library playback just dies.
+            print(f'Expired direct manifest {media}, regenerating')
+            media = rebuild_with_fresh_meta(media)
+        if media and media.endswith('.url'):
+            resp = stream_from_url_file(media)
+            if resp_status(resp) < 400:
+                return resp
+            # The CDN URL inside the redirect file carries a signed expiry;
+            # once it lapses the CDN refuses (e.g. 472) and this file is dead
+            # weight. Prefer any locally cached copy, else force a fresh meta
+            # (the stale source came from it) and rebuild once.
+            print(f'Stale redirect file {media}, self-healing')
+            local = (check_media(url, f'video-{res}') if res else None) \
+                or check_media(url, 'audio' if res == 'audio' else 'video')
+            if local and not local.endswith('.url'):
+                return send_file_partial(local)
+            media = rebuild_with_fresh_meta(media)
             if media and media.endswith('.url'):
                 return stream_from_url_file(media)
         return host_file(url, media_type)
