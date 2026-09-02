@@ -802,6 +802,7 @@ def resp_direct():
         if media and media.endswith('.url'):
             resp = stream_from_url_file(media)
             if resp_status(resp) < 400:
+                mark_watched_async(url)
                 return resp
             # The CDN URL inside the redirect file carries a signed expiry;
             # once it lapses the CDN refuses (e.g. 472) and this file is dead
@@ -811,9 +812,11 @@ def resp_direct():
             local = (check_media(url, f'video-{res}') if res else None) \
                 or check_media(url, 'audio' if res == 'audio' else 'video')
             if local and not local.endswith('.url'):
+                mark_watched_async(url)
                 return send_file_partial(local)
             media = rebuild_with_fresh_meta(media)
             if media and media.endswith('.url'):
+                mark_watched_async(url)
                 return stream_from_url_file(media)
         return host_file(url, media_type)
     except Exception as e:

@@ -920,10 +920,20 @@ def send_file_partial(path, download_name: str | None = None):
                      conditional=True)
 
 
+_PLAYBACK_MEDIA_TYPES = ('video', 'audio', 'low', 'direct', 'hls')
+
+
+def mark_watched_async(url):
+    """Record a playback event without blocking the response."""
+    Thread(target=library_db.mark_watched, args=(url,), daemon=True).start()
+
+
 def host_file(url: str, media_type='video', download_name: str | None = None):
     if not url: return jsonify({"error": "URL parameter is required"}), 400
     file = MediaDownloader(url, media_type).run()
     if file:
+        if media_type.startswith(_PLAYBACK_MEDIA_TYPES):
+            mark_watched_async(url)
         if download_name:
             if '-' in media_type: download_name += '-' + media_type.split('-', 1)[-1]
             download_name += os.path.splitext(file)[1]

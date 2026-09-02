@@ -61,6 +61,7 @@ Response:
       "upload_date": "20240101",
       "has_thumb": 1,
       "saved_at": 1737000000,
+      "last_watched_at": 1737000000,
       "hidden": 0,
       "site_hidden": false,
       "tags": ["..."],
@@ -76,6 +77,7 @@ Response:
 ```
 
 - `id` is the same value as `dir_hash` — a 40-char sha1 of the source URL. Use it as `?id=` on any single-video endpoint.
+- Videos are ordered by `last_watched_at` (falling back to `saved_at` for never-played entries), newest first. `saved_at` is fixed at the time the video first entered the library; `last_watched_at` is `null` until playback is served and then bumps on each play (debounced to once a minute).
 - `thumb_url` uses the opaque id (bypasses URL-based blockers) and transparently falls back to a sprite tile when the source didn't provide a proper thumbnail.
 - `has_thumb` is `0` (none), `1` (still image) or `2` (still image **plus** an animated preview clip). When it's `2`, `GET /t/<id>.mp4` serves the clip; `/t/<id>` stays a still so `<img>` keeps working. Both are served from the **site root**, not under `/api/v1` — see the note on `/t/` below.
 - `watch_url` still uses `?url=` since /watch is not currently an id-aware route.

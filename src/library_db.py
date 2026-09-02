@@ -127,6 +127,10 @@ def init_db():
         existing_cols = {r['name'] for r in conn.execute("PRAGMA table_info(videos)").fetchall()}
         if 'hidden' not in existing_cols:
             conn.execute("ALTER TABLE videos ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+        # Watch history timestamp, set by playback endpoints via mark_watched().
+        # NULL = never played since the column existed; sort falls back to saved_at.
+        if 'last_watched_at' not in existing_cols:
+            conn.execute("ALTER TABLE videos ADD COLUMN last_watched_at INTEGER")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_source_site ON videos(source_site)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_saved_at ON videos(saved_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_hidden ON videos(hidden)")
@@ -301,7 +305,11 @@ def list_videos(include_hidden=False):
         sql = "SELECT v.* FROM videos v"
         if not include_hidden:
             sql += " WHERE " + _VISIBILITY_WHERE
-        sql += " ORDER BY v.saved_at DESC"
+        # History-style ordering: most recently played first; never-played rows
+        # fall back to when they were first saved. saved_at is frozen at first
+        # insert, so meta.json rewrites (revalidation, manifest self-heal) no
+        # longer shuffle the library.
+        sql += " ORDER BY COALESCE(v.last_watched_at, v.saved_at) DESC"
         rows = conn.execute(sql).fetchall()
         videos = [dict(r) for r in rows]
         tags_map = _list_labels_for(conn, 'video_tags', 'tag_id', 'tags')
@@ -501,8 +509,7 @@ def _upsert_with_meta(conn, row, tag_names, cat_names):
             width=excluded.width,
             height=excluded.height,
             upload_date=excluded.upload_date,
-            has_thumb=excluded.has_thumb,
-            saved_at=excluded.saved_at
+            has_thumb=excluded.has_thumb
     """, row)
     _sync_associations(conn, url, tag_names, cat_names)
 
@@ -529,6 +536,28 @@ def sync_url(url):
         _upsert_with_meta(conn, _row_from_meta(url, name, vid_dir, meta), tags, cats)
         _prune_orphans(conn)
     return url
+
+
+def mark_watched(url, debounce=60):
+    """Record a playback event: bump last_watched_at, at most once per
+    `debounce` seconds (players issue bursts of range/segment requests).
+    If the row doesn't exist yet (first play racing the async sync), sync it
+    from disk first. Returns True if the timestamp was bumped."""
+    import time as _time
+    if not url: return False
+    now = int(_time.time())
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE videos SET last_watched_at = ? WHERE url = ? "
+            "AND COALESCE(last_watched_at, 0) <= ?",
+            (now, url, now - debounce))
+        if cur.rowcount: return True
+        exists = conn.execute("SELECT 1 FROM videos WHERE url = ?", (url,)).fetchone()
+    if exists: return False  # row present, just inside the debounce window
+    if not sync_url(url): return False
+    with _connect() as conn:
+        cur = conn.execute("UPDATE videos SET last_watched_at = ? WHERE url = ?", (now, url))
+    return cur.rowcount > 0
 
 
 def rebuild():
@@ -563,6 +592,11 @@ def rebuild():
             ))
     with _connect() as conn:
         hidden_urls = {r['url'] for r in conn.execute("SELECT url FROM videos WHERE hidden = 1").fetchall()}
+        # History must survive a rebuild: keep each row's original saved_at
+        # (the fresh insert would re-derive it from meta.json's current mtime)
+        # and its last_watched_at (which only exists in the DB).
+        prior = {r['url']: (r['saved_at'], r['last_watched_at']) for r in conn.execute(
+            "SELECT url, saved_at, last_watched_at FROM videos").fetchall()}
         conn.execute("DELETE FROM video_tags")
         conn.execute("DELETE FROM video_categories")
         conn.execute("DELETE FROM tags")
@@ -570,6 +604,9 @@ def rebuild():
         conn.execute("DELETE FROM videos")
         for row, tags, cats in entries:
             _upsert_with_meta(conn, row, tags, cats)
+        conn.executemany(
+            "UPDATE videos SET saved_at = ?, last_watched_at = ? WHERE url = ?",
+            [(sa, lw, u) for u, (sa, lw) in prior.items()])
         if hidden_urls:
             conn.executemany("UPDATE videos SET hidden = 1 WHERE url = ?", [(u,) for u in hidden_urls])
     return len(entries)
