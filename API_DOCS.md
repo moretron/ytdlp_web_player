@@ -181,6 +181,22 @@ Playback URL options across formats. Each entry gives HLS, direct, and download 
 
 Fetch any `hls`/`direct` URL through the same server; it'll serve the appropriate manifest or file.
 
+### Root-mounted: `GET /cache_status?url=<url>&quality=<res|audio|empty>` (not `/api/v1/cache_status`)
+
+How much of a stream the server has cached, for progress UI. Read-only — never triggers a download or transcode. Poll it (~5 s) while playing.
+
+```json
+{
+  "duration": 380,
+  "hls": {"done": 210, "total": 500},
+  "file": {"bytes": 55000000, "complete": false, "expected_bytes": 110000000}
+}
+```
+
+- `hls` appears once an `hls-<quality>.m3u8` exists: `done` segments on disk vs `total` `#EXTINF` entries — an exact transcode fraction.
+- `file` covers the downloaded media for that quality (including yt-dlp's `*.part` and the `temp-*` phase of the split video+audio download). While incomplete, `expected_bytes` estimates the final size from the meta formats (per-format `filesize`/`filesize_approx`, bitrate×duration fallback) — treat `bytes/expected_bytes` as approximate and only trust `complete: true` for 100%. `expected_bytes` is absent when the meta gives nothing to estimate from.
+- Keys are simply absent when not applicable (e.g. direct/proxied playback caches nothing). `{}` means no cache dir yet.
+
 ### `GET /videos/thumb?id=<hash>` or `?url=<url>`
 
 302 redirect to `/t/<hash>` (which serves `thumb.jpg` or falls back to a sprite tile).
