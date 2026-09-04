@@ -937,6 +937,41 @@ def serve_extension():
     return Response(extension, mimetype='text/javascript')
 
 
+def _expected_media_bytes(meta, res):
+    """Best-effort size of what MediaDownloader will produce for `res`,
+    mirroring its bestvideo[height<=res]+bestaudio selection. Per-format
+    filesize (exact) or filesize_approx, falling back to bitrate*duration.
+    None when the meta gives nothing to go on — callers must cope."""
+    formats = meta.get('formats') or []
+    duration = meta.get('duration') or 0
+
+    def size_of(f):
+        s = f.get('filesize') or f.get('filesize_approx')
+        if s: return int(s)
+        br = f.get('tbr') or f.get('vbr') or f.get('abr')
+        if br and duration: return int(br * 1000 / 8 * duration)
+        return None
+
+    def best(cands, key):
+        cands = [f for f in cands if size_of(f)]
+        return max(cands, key=key) if cands else None
+
+    audio_only = [f for f in formats
+                  if f.get('acodec') not in (None, 'none') and f.get('vcodec') in (None, 'none')]
+    best_audio = best(audio_only, lambda f: f.get('abr') or f.get('tbr') or 0)
+    if res == 'audio':
+        return size_of(best_audio) if best_audio else None
+    videos = [f for f in formats if f.get('vcodec') not in (None, 'none')]
+    if res.isdigit():
+        videos = [f for f in videos if (f.get('height') or 0) <= int(res)] or videos
+    v = best(videos, lambda f: ((f.get('height') or 0), f.get('tbr') or 0))
+    if not v: return None
+    total = size_of(v)
+    if v.get('acodec') in (None, 'none') and best_audio:
+        total += size_of(best_audio)
+    return total
+
+
 @app.route('/cache_status')
 def cache_status():
     """How much of a stream the server has cached, for progress UI.
@@ -944,7 +979,10 @@ def cache_status():
     HLS: the manifest is written in full up front while ffmpeg fills the
     segment directory behind it, so segments-on-disk vs #EXTINF entries is an
     exact measure of transcode progress. Files: presence/size of the
-    downloaded media (a *.part shows in-flight yt-dlp downloads).
+    downloaded media; an in-flight yt-dlp download (*.part, or the temp-*
+    phase of the split video+audio path) reports its bytes so far plus an
+    expected_bytes estimate from the meta formats, so clients can draw a
+    fraction before the download completes.
     Read-only — never triggers a download."""
     try:
         url = get_url(request)
@@ -953,6 +991,13 @@ def cache_status():
         data_dir = get_data_dir(url)
         out = {}
         if os.path.isdir(data_dir):
+            meta = {}
+            try:
+                with open(os.path.join(data_dir, 'meta.json'), 'r') as f:
+                    meta = json.load(f)
+                out['duration'] = meta.get('duration')
+            except Exception:
+                pass
             hls_name = f'hls-{res}'.removesuffix('-')
             m3u8 = os.path.join(data_dir, f'{hls_name}.m3u8')
             if os.path.exists(m3u8):
@@ -964,19 +1009,26 @@ def cache_status():
                     done = sum(1 for s in os.listdir(seg_dir) if s.endswith('.ts'))
                 out['hls'] = {'done': done, 'total': total}
             file_name = 'audio' if res == 'audio' else (f'video-{res}' if res else 'video')
+            partial = 0
             for i in os.listdir(data_dir):
-                if not i.startswith(file_name): continue
+                if i.endswith(('.ytdl', '.temp')): continue
+                if not i.removeprefix('temp-').startswith(file_name): continue
                 path = os.path.join(data_dir, i)
-                if i.endswith('.part'):
-                    out.setdefault('file', {'bytes': os.path.getsize(path), 'complete': False})
-                elif not i.endswith(('.ytdl', '.temp')):
-                    out['file'] = {'bytes': os.path.getsize(path), 'complete': True}
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    continue
+                if i.startswith('temp-') or i.endswith('.part'):
+                    # temp-video-X and its own .part coexist briefly; max
+                    # avoids double-counting the same bytes.
+                    partial = max(partial, size)
+                else:
+                    out['file'] = {'bytes': size, 'complete': True}
                     break
-            try:
-                with open(os.path.join(data_dir, 'meta.json'), 'r') as f:
-                    out['duration'] = json.load(f).get('duration')
-            except Exception:
-                pass
+            if 'file' not in out and partial:
+                out['file'] = {'bytes': partial, 'complete': False}
+                if expected := _expected_media_bytes(meta, res):
+                    out['file']['expected_bytes'] = expected
         return jsonify(out), 200
     except Exception as e:
         return pprint_exc(e)

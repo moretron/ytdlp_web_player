@@ -402,9 +402,18 @@ function stopCacheStatusPolling()
     if (cacheStatusTimer) { clearInterval(cacheStatusTimer); cacheStatusTimer = null; }
 }
 
-// Thin bar under the seekbar showing how much the SERVER has cached
-// (transcoded HLS segments / finished download) — distinct from the
-// browser's own buffered ranges.
+function formatBytes(n)
+{
+    if (!n && n !== 0) return '';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+    return `${i ? n.toFixed(1) : n} ${units[i]}`;
+}
+
+// Server-side cache progress (how much yt-dlp/ffmpeg has ready) — distinct
+// from the browser's own buffered ranges. Rendered twice: a thin bar under
+// the seekbar, and an always-visible labelled strip under the video.
 async function updateCacheStatusBar()
 {
     if (document.hidden) return;
@@ -415,28 +424,68 @@ async function updateCacheStatusBar()
         if (!resp.ok) return;
         const data = await resp.json();
         let frac = null;
-        if (usesHls && data.hls && data.hls.total > 0) frac = data.hls.done / data.hls.total;
-        else if (data.file) frac = data.file.complete ? 1 : null;
+        let label = '';
+        if (usesHls && data.hls && data.hls.total > 0)
+        {
+            frac = data.hls.done / data.hls.total;
+            label = frac >= 1 ? `Cached on server · ${data.hls.total} segments`
+                : `Server caching ${Math.floor(frac * 100)}% · ${data.hls.done}/${data.hls.total} segments`;
+        }
+        else if (data.file && data.file.complete)
+        {
+            frac = 1;
+            label = `Cached on server · ${formatBytes(data.file.bytes)}`;
+        }
+        else if (data.file && data.file.expected_bytes)
+        {
+            // In-flight yt-dlp download: expected_bytes is an estimate from
+            // the meta formats, so never show a premature 100%.
+            frac = Math.min(data.file.bytes / data.file.expected_bytes, 0.99);
+            label = `Server caching ${Math.floor(frac * 100)}% · ${formatBytes(data.file.bytes)} of ~${formatBytes(data.file.expected_bytes)}`;
+        }
+        else if (data.file)
+        {
+            label = `Server caching · ${formatBytes(data.file.bytes)} so far`;
+        }
+
+        const strip = document.getElementById('server-cache-strip');
+        if (strip)
+        {
+            strip.hidden = !label;
+            if (label)
+            {
+                strip.querySelector('.server-cache-strip-label').textContent = label;
+                const fill = strip.querySelector('.server-cache-strip-fill');
+                fill.style.width = `${Math.min(100, (frac ?? 0) * 100)}%`;
+                strip.classList.toggle('indeterminate', frac === null);
+                strip.classList.toggle('complete', frac !== null && frac >= 1);
+            }
+        }
+
         const holder = document.querySelector('.vjs-progress-holder');
-        if (!holder) return;
-        let bar = holder.querySelector('.server-cache-bar');
-        if (frac === null)
+        if (holder)
         {
-            if (bar) bar.remove();
-            return;
+            let bar = holder.querySelector('.server-cache-bar');
+            if (frac === null)
+            {
+                if (bar) bar.remove();
+            }
+            else
+            {
+                if (!bar)
+                {
+                    bar = document.createElement('div');
+                    bar.className = 'server-cache-bar';
+                    bar.title = 'Cached on server';
+                    holder.appendChild(bar);
+                }
+                bar.style.width = `${Math.min(100, frac * 100)}%`;
+            }
         }
-        if (!bar)
-        {
-            bar = document.createElement('div');
-            bar.className = 'server-cache-bar';
-            bar.title = 'Cached on server';
-            holder.appendChild(bar);
-        }
-        bar.style.width = `${Math.min(100, frac * 100)}%`;
         // Livestreams grow manifest and segments together, so done/total
         // transiently hits 1.0 — never auto-stop for them.
         const isLive = info && parseFloat(info.duration) === 0;
-        if (frac >= 1 && !isLive) stopCacheStatusPolling();
+        if (frac !== null && frac >= 1 && !isLive) stopCacheStatusPolling();
     }
     catch (e) {}
 }

@@ -1833,3 +1833,57 @@ body.library-body
     pointer-events: none;
     transition: width 0.4s ease;
 }
+
+/* Always-visible strip under the video: same data as .server-cache-bar but
+   with a label, so cache progress is readable without hovering the seekbar. */
+.server-cache-strip
+{
+    display: flex;
+    align-items: center;
+    gap: 0.75em;
+    padding: 0.35em 1em;
+    font-size: 0.85em;
+    color: var(--theme-fg, #ddd);
+    opacity: 0.85;
+}
+
+.server-cache-strip-track
+{
+    flex: 1;
+    height: 5px;
+    border-radius: 3px;
+    background: rgba(128, 128, 128, 0.25);
+    overflow: hidden;
+}
+
+.server-cache-strip-fill
+{
+    height: 100%;
+    width: 0;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.6);
+    transition: width 0.4s ease;
+}
+
+.server-cache-strip.complete .server-cache-strip-fill
+{
+    background: #59c96e;
+}
+
+/* No expected size to divide by: show a gentle pulse instead of a fill. */
+.server-cache-strip.indeterminate .server-cache-strip-fill
+{
+    width: 100% !important;
+    animation: cache-strip-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes cache-strip-pulse
+{
+    0%, 100% { opacity: 0.15; }
+    50%      { opacity: 0.45; }
+}
+
+.server-cache-strip-label
+{
+    white-space: nowrap;
+}
