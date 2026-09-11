@@ -758,6 +758,7 @@ class SettingsButton extends videojs.getComponent('Button')
 
     handleOpenMenu()
     {
+        player.controlBar?.PlaybackRateButton?.handleCloseMenu();
         this.menu.style.display = 'flex';
     }
 
@@ -790,6 +791,7 @@ class SettingsButton extends videojs.getComponent('Button')
         this.downloadButton.el().style.display = '';
         this.repeatButton.el().style.display = '';
         this.playbackSpeedButton.el().style.display = '';
+        if (player.controlBar?.PlaybackRateButton) player.controlBar.PlaybackRateButton.el().style.display = '';
     }
 }
 videojs.registerComponent('SettingsButton', SettingsButton);
@@ -1380,6 +1382,106 @@ class SubtitleSwitcherButton extends videojs.getComponent('Button')
 videojs.registerComponent('SubtitleSwitcherButton', SubtitleSwitcherButton);
 
 
+const PLAYBACK_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+const PLAYBACK_SPEED_STEP = 0.25;
+const PLAYBACK_SPEED_MIN = PLAYBACK_SPEEDS[0];
+const PLAYBACK_SPEED_MAX = PLAYBACK_SPEEDS[PLAYBACK_SPEEDS.length - 1];
+let playbackRateOsd = null;
+let playbackRateOsdTimer = null;
+
+function formatPlaybackRate(rate)
+{
+    return `${Math.round(rate * 100) / 100}x`;
+}
+
+function setPlaybackSpeed(rate, showOsd = false)
+{
+    rate = Math.min(PLAYBACK_SPEED_MAX, Math.max(PLAYBACK_SPEED_MIN, Math.round(rate * 100) / 100));
+    player.playbackRate(rate);
+    if (showOsd) showPlaybackRateOsd(rate);
+}
+
+function stepPlaybackSpeed(delta)
+{
+    setPlaybackSpeed(player.playbackRate() + delta, true);
+}
+
+function showPlaybackRateOsd(rate)
+{
+    if (!playbackRateOsd) return;
+    playbackRateOsd.textContent = formatPlaybackRate(rate);
+    playbackRateOsd.classList.add('vjs-rate-osd-visible');
+    clearTimeout(playbackRateOsdTimer);
+    playbackRateOsdTimer = setTimeout(() => playbackRateOsd.classList.remove('vjs-rate-osd-visible'), 800);
+}
+
+// Builds the list of speed options shared by the gear submenu and the
+// control-bar rate button. Highlighting is kept in sync by syncPlaybackRateUi
+// on 'ratechange', so a speed set from the keyboard, the other menu or a
+// quality-switch restore is reflected everywhere.
+function createPlaybackSpeedMenu(owner)
+{
+    const menu = document.createElement('div');
+    menu.classList.add('vjs-setting-menu', 'vjs-playback-speed-menu');
+    menu.style.display = 'none';
+    // Components are built before the global `player` is assigned, and
+    // PlaybackSpeedButton shadows Component.player() with a property, so
+    // read the underlying field.
+    const currentRate = owner.player_.playbackRate();
+
+    PLAYBACK_SPEEDS.forEach(speed => {
+        const button = document.createElement('button');
+        button.textContent = formatPlaybackRate(speed);
+        button.classList.add('vjs-playback-speed-option');
+        button.dataset.speed = speed;
+        if (currentRate === speed)
+        {
+            button.classList.add('vjs-menu-option-selected');
+        }
+
+        var moved = false;
+        button.ontouchstart = (event) => {
+            setTimeout(() => {
+                if (moved) return;
+                event.preventDefault();
+                tryStopPropagation(event);
+                button.click();
+            }, 200);
+            moved = false;
+        };
+
+        button.ontouchmove = (event) => {
+            moved = true;
+        };
+
+        button.onclick = (event) => {
+            tryStopPropagation(event);
+            setPlaybackSpeed(speed);
+            owner.handleCloseMenu(true);
+        };
+        menu.appendChild(button);
+    });
+    return menu;
+}
+
+function syncPlaybackRateUi()
+{
+    const rate = player.playbackRate();
+    const active = Math.abs(rate - 1) > 0.001;
+    document.querySelectorAll('.vjs-playback-speed-option').forEach(btn => {
+        btn.classList.toggle('vjs-menu-option-selected', Math.abs(parseFloat(btn.dataset.speed) - rate) < 0.001);
+    });
+    const speedButton = player.controlBar?.SettingsButton?.playbackSpeedButton;
+    if (speedButton) speedButton.el().classList.toggle('vjs-active', active);
+    const rateButton = player.controlBar?.PlaybackRateButton;
+    if (rateButton)
+    {
+        rateButton.label.textContent = formatPlaybackRate(rate);
+        rateButton.el().classList.toggle('vjs-active', active);
+    }
+}
+
+
 class PlaybackSpeedButton extends videojs.getComponent('Button')
 {
     constructor(player, options)
@@ -1423,58 +1525,58 @@ class PlaybackSpeedButton extends videojs.getComponent('Button')
 
     createPlaybackSpeedMenu()
     {
-        const menu = document.createElement('div');
-        menu.classList.add('vjs-setting-menu');
-        menu.style.display = 'none';
-
-        const speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
-        speeds.forEach(speed => {
-            const button = document.createElement('button');
-            button.textContent = `${speed}x`;
-            button.classList.add('vjs-playback-speed-option');
-            if (this.player && this.player.playbackRate() === speed)
-            {
-                button.classList.add('vjs-menu-option-selected');
-            }
-
-
-            var moved = false;
-            button.ontouchstart = (event) => {
-                setTimeout(() => {
-                    if (moved) return;
-                    event.preventDefault();
-                    tryStopPropagation(event);
-                    button.click();
-                }, 200);
-                moved = false;
-            };
-
-            button.ontouchmove = (event) => {
-                moved = true;
-            };
-
-
-            button.onclick = (event) => {
-                tryStopPropagation(event);
-                this.player.playbackRate(speed);
-                if (speed == 1.0)
-                    this.el().classList.remove('vjs-active');
-                else
-                    this.el().classList.add('vjs-active');
-
-                this.menu.querySelectorAll('.vjs-playback-speed-option').forEach(btn => {
-                    btn.classList.remove('vjs-menu-option-selected');
-                });
-                button.classList.add('vjs-menu-option-selected');
-
-                this.handleCloseMenu(true);
-            };
-            menu.appendChild(button);
-        });
-        return menu;
+        return createPlaybackSpeedMenu(this);
     }
 }
 videojs.registerComponent('PlaybackSpeedButton', PlaybackSpeedButton);
+
+
+// Always-visible speed control in the control bar, showing the current rate.
+class PlaybackRateButton extends videojs.getComponent('Button')
+{
+    constructor(player, options)
+    {
+        super(player, options);
+        this.addClass('vjs-playback-rate-button');
+        this.controlText('Playback Speed [shift+< / shift+>]');
+        this.el().title = 'Playback speed  [shift+<]  [shift+>]';
+        this.label = document.createElement('span');
+        this.label.classList.add('vjs-playback-rate-label');
+        this.label.textContent = formatPlaybackRate(player.playbackRate());
+        this.el().innerHTML = '';
+        this.el().appendChild(this.label);
+        this.el().style.display = 'none';
+
+        this.menu = createPlaybackSpeedMenu(this);
+        this.el().appendChild(this.menu);
+    }
+
+    handleClick(event)
+    {
+        tryStopPropagation(event);
+        if (this.menu.style.display === 'flex')
+            this.handleCloseMenu();
+        else
+            this.handleOpenMenu();
+    }
+
+    handleOpenMenu()
+    {
+        const settings = player.controlBar?.SettingsButton;
+        if (settings)
+        {
+            settings.closeAllSubmenus();
+            settings.handleCloseMenu();
+        }
+        this.menu.style.display = 'flex';
+    }
+
+    handleCloseMenu(propagate = false)
+    {
+        this.menu.style.display = 'none';
+    }
+}
+videojs.registerComponent('PlaybackRateButton', PlaybackRateButton);
 
 
 const Component = videojs.getComponent('Component');
@@ -1769,6 +1871,7 @@ function loadVideo()
                 'TimeDivider',
                 'DurationDisplay',
                 'progressControl',
+                'PlaybackRateButton',
                 'SettingsButton',
                 'PictureInPictureToggle',
                 'ZoomToFillToggle',
@@ -1798,13 +1901,23 @@ function loadVideo()
                     },
                     preciseBackwardKey:
                     {
-                        key: function (event) {return event.code == "Comma";},
+                        key: function (event) {return event.code == "Comma" && !event.shiftKey;},
                         handler: function (player, options, event) {player.currentTime(player.currentTime() - 0.1);},
                     },
                     preciseForwardKey:
                     {
-                        key: function (event) {return event.code == "Period";},
+                        key: function (event) {return event.code == "Period" && !event.shiftKey;},
                         handler: function (player, options, event) {player.currentTime(player.currentTime() + 0.1);},
+                    },
+                    speedDownKey:
+                    {
+                        key: function (event) {return event.code == "Comma" && event.shiftKey;},
+                        handler: function (player, options, event) {stepPlaybackSpeed(-PLAYBACK_SPEED_STEP);},
+                    },
+                    speedUpKey:
+                    {
+                        key: function (event) {return event.code == "Period" && event.shiftKey;},
+                        handler: function (player, options, event) {stepPlaybackSpeed(PLAYBACK_SPEED_STEP);},
                     },
                 },
                 captureDocumentHotkeys: true,
@@ -1825,6 +1938,11 @@ function loadVideo()
     player.el_.appendChild(skipSegment);
     skipSegment.id = "skipsegment";
     skipSegment.onclick = function() {skipclick();};
+
+    playbackRateOsd = document.createElement('div');
+    playbackRateOsd.classList.add('vjs-rate-osd');
+    player.el_.appendChild(playbackRateOsd);
+    player.on('ratechange', syncPlaybackRateUi);
 
     player.on('timeupdate', () => {
         if (repeatMode && player.currentTime() >= repeatEndTime)

@@ -169,6 +169,43 @@
   font-size: 1.2em;
 }
 
+.vjs-playback-rate-button {
+    order: 5;
+    cursor: pointer;
+    min-width: 3.4em;
+}
+.vjs-playback-rate-label {
+    font-size: 1.15em;
+    font-weight: bold;
+    letter-spacing: -0.02em;
+    line-height: 3em;
+    white-space: nowrap;
+}
+.vjs-playback-rate-button .vjs-setting-menu {
+    right: 50%;
+    transform: translateX(50%);
+}
+.vjs-rate-osd {
+    position: absolute;
+    top: 12%;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 0.4em 1em;
+    border-radius: 7px;
+    background-color: rgba(0, 0, 0, 0.65);
+    color: #eee;
+    font-size: 1.6em;
+    font-weight: bold;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .2s ease;
+    z-index: 12;
+}
+.vjs-rate-osd.vjs-rate-osd-visible {
+    opacity: 1;
+    transition: none;
+}
+
 .vjs-settings-button {
     order: 6;
     cursor: pointer;
