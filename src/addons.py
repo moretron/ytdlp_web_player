@@ -1,28 +1,30 @@
+import copy
 import http.cookies
 import json
 import math
 import mimetypes
 import os
 import re
-import subprocess
 import time
 import traceback
 import io
+import ipaddress
 import requests
 import shutil
+import socket
 import struct
 from PIL import Image
 from datetime import datetime
 from hashlib import sha1
 from multiprocessing import Process, Queue
 from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urljoin, urlparse, urlunparse
-from flask import Response, jsonify, request, send_file
+from flask import Response, has_request_context, jsonify, request, send_file
 from external import External
+from ffmpeg import FFMPEG
 from main import *
 from sb import SponsorBlock
 import library_db
 
-yt_dlp = External.yt_dlp()
 
 
 def backfill_duration(url):
@@ -207,7 +209,6 @@ class Processes:
         return cancelled_count
 
 
-
 class YTDLP:
 
     class Logger:
@@ -235,16 +236,26 @@ class YTDLP:
 
 
     @staticmethod
+    def ydl(opts: dict):
+        yt_dlp = External.yt_dlp()
+        if imp_str := opts.get('impersonate'):
+            try:
+                target = yt_dlp.networking.impersonate.ImpersonateTarget.from_str(imp_str)
+                return yt_dlp.YoutubeDL(opts | {'impersonate': target})
+            except Exception as e:
+                pprint_exc(e)
+                print('Impersonation raised an error, removing "impersonate" argument from yt-dlp')
+                opts.pop('impersonate', None)
+        return yt_dlp.YoutubeDL(opts)
+
+
+    @staticmethod
     def _ydl_runner(url, opts, with_info, arg, queue, yt_id = None):
         logger = YTDLP.Logger(url, opts, 'download', yt_id)
         try:
-            # Prepend (once, with the separator) instead of the old buggy
-            # append that concatenated without os.pathsep and grew PATH on
-            # every call.
-            for tool in (ffmpeg, js_runtime):
-                if tool and (d := os.path.dirname(tool)) and d not in os.environ['PATH'].split(os.pathsep):
-                    os.environ['PATH'] = d + os.pathsep + os.environ['PATH']
-            with yt_dlp.YoutubeDL(opts | {'logger': logger}) as ydl:
+            add_to_path(ffmpeg)
+            add_to_path(js_runtime)
+            with YTDLP.ydl(copy.deepcopy(opts) | {'logger': logger}) as ydl:
                 if with_info:
                     ydl.download_with_info_file(arg)
                 else:
@@ -255,8 +266,8 @@ class YTDLP:
 
 
     @staticmethod
-    def download(url, opts):
-        if (proxy): opts["proxy"] = proxy
+    def download(url, opts, expected_media: str|None = None):
+        if (proxy := get_proxy(url)): opts["proxy"] = proxy
         logger = YTDLP.Logger(url, opts, 'download')
         def ydl_download(url, opts, with_info = False):
             q = Queue()
@@ -270,6 +281,7 @@ class YTDLP:
                 logger.error(q.get())
             logger.info(f'Exited with code {p.exitcode}')
             if p.exitcode != 0: raise RuntimeError(f'YT-DLP exited unexpectedly with return code {p.exitcode}')
+            if expected_media and not check_media(url, expected_media): raise RuntimeError(f'YT-DLP did not download {expected_media}')
 
         try:
             try:
@@ -294,12 +306,11 @@ class YTDLP:
 
     @staticmethod
     def get_info(url, opts):
-        if (proxy): opts["proxy"] = proxy
+        if (proxy := get_proxy(url)): opts["proxy"] = proxy
         logger = YTDLP.Logger(url, opts, 'extract_info')
-        if js_runtime and (d := os.path.dirname(js_runtime)) and d not in os.environ['PATH'].split(os.pathsep):
-            os.environ['PATH'] = d + os.pathsep + os.environ['PATH']
+        add_to_path(js_runtime)
         try:
-            with yt_dlp.YoutubeDL(json.loads(json.dumps(opts)) | {'logger': logger}) as ydl:
+            with YTDLP.ydl(copy.deepcopy(opts) | {'logger': logger}) as ydl:
                 return ydl.sanitize_info(ydl.extract_info(url, download=False))
         except Exception as e:
             if (cookies := get_global_cookies_file(True)):
@@ -308,77 +319,18 @@ class YTDLP:
                 opts["cookiefile"] = cookies
                 opts["mark_watched"] = False
                 logger.start(url, opts, 'extract_info')
-                with yt_dlp.YoutubeDL(opts | {'logger': logger}) as ydl:
-                    return ydl.sanitize_info(ydl.extract_info(url, download=False))
+                try:
+                    with YTDLP.ydl(copy.deepcopy(opts) | {'logger': logger}) as ydl:
+                        return ydl.sanitize_info(ydl.extract_info(url, download=False))
+                except Exception as e:
+                    advance_proxy(url)
+                    raise e
             else:
                 logger.error('An error occured when downloading. Providing cookies may help with this issue.')
+                advance_proxy(url)
                 raise e
         finally:
             logger.finish()
-
-
-
-class FFMPEG:
-    def __init__(self, url, ffmpeg_command=None, affected_files=None):
-        """
-        Provide ffmpeg_command to run synchronously. Check with `success`.
-        `affected_files` are removed if the command fails — passing them here
-        (rather than assigning after run()) means they're also cleaned when a
-        synchronous run raises.
-        """
-        self._p = None
-        self.pid = None
-        self.ffmpeg = ffmpeg
-        self.ff_id = sha1(f'{time.time()}'.encode()).hexdigest()[:6]
-        self.success = False
-        self.stdout = ''
-        self.start_time = time.time()
-        self.url = url
-        self.affected_files = affected_files or []
-        self._killed = False
-        if ffmpeg_command and self.ffmpeg:
-            self.run(ffmpeg_command)
-
-    def kill(self):
-        if self._p is None: return
-        # Deliberate kill (e.g. HLS regenerate): the caller owns the output
-        # files now, so run()'s failure cleanup must not delete them.
-        self._killed = True
-        Processes.rm(self.pid, kill=True)
-        print(f'[FFMPEG {self.ff_id}] Killed')
-
-    def run(self, ffmpeg_command):
-        """
-        Also runs synchronously, but can be placed in `Thread`
-        """
-        if not self.ffmpeg: return None
-        # -nostdin: ffmpeg reading an inherited stdin is a classic silent hang.
-        ffmpeg_command = [self.ffmpeg, '-nostdin'] + ffmpeg_command
-        # Inherit the environment — replacing it wholesale stripped PATH/HOME
-        # from ffmpeg whenever a proxy was configured.
-        ffmpeg_env = {**os.environ, f"{proxy.split('://')[0]}_proxy": proxy} if proxy else None
-        print(f'[FFMPEG {self.ff_id}] Executing {ffmpeg_command}')
-        self._p = subprocess.Popen(ffmpeg_command, stdout = subprocess.PIPE, stderr = subprocess.STDOUT, env=ffmpeg_env)
-        self.pid = self._p.pid
-        Processes.setitem(self.pid, [self.url, f'FFMPEG {self.ff_id}', time.time()])
-        for line in self._p.stdout:
-            line_out = line.decode().strip()
-            print(f'[FFMPEG {self.ff_id}] {line_out}')
-            self.stdout += line_out + '\n'
-            if time.time() - self.start_time > 3600:
-                self.kill()
-                self.success = False
-                raise TimeoutError()
-        self._p.wait()
-        Processes.rm(self.pid)
-        if self._p.returncode != 0:
-            self.success = False
-            if not self._killed:
-                for file in self.affected_files:
-                    if os.path.exists(file): os.remove(file)
-            raise RuntimeError(f'FFMPEG exited unexpectedly with return code {self._p.returncode}')
-        print(f'[FFMPEG {self.ff_id}] Finished')
-        self.success = True
 
 
 
@@ -405,6 +357,7 @@ class MediaDownloader:
             elif self.media_type.startswith('low'): self.low()
             elif self.media_type.startswith('sub'): self.sub()
             elif self.media_type.startswith('sprite'): self.sprite()
+            elif self.media_type.startswith('picture'): self.picture()
         result = check_media(url=self.url, media_type=self.media_type)
         Thread(target=post_media_hooks, args=(self.url, self.media_type), daemon=True).start()
         return result
@@ -417,6 +370,7 @@ class MediaDownloader:
         self.ydl_opts.update(ydl_global_opts)
         if cookies := check_media(self.url, 'cookies') or get_global_cookies_file(): self.ydl_opts["cookiefile"] = cookies
         self.meta = get_meta(self.url)
+        if not self.meta: raise RuntimeError("Video metadata cannot be gathered!")
         if int(self.meta.get('duration') or 0) > max_video_duration: raise ValueError("Video too long for this app to handle")
         self.timestamps = re.search(r'_(\d+\.?\d*)-(\d+\.?\d*)', self.media_type)
         self.start_time = None
@@ -428,7 +382,7 @@ class MediaDownloader:
             try:
                 self.start_time = float(self.timestamps.group(1))
                 self.end_time = float(self.timestamps.group(2))
-                self.ydl_opts.update({'download_ranges': yt_dlp.utils.download_range_func(None, [(self.start_time, self.end_time)]), 'force_keyframes_at_cuts': True})
+                self.ydl_opts.update({'download_ranges': External.yt_dlp().utils.download_range_func(None, [(self.start_time, self.end_time)]), 'force_keyframes_at_cuts': True})
                 print(f"Downloading section {self.start_time}-{self.end_time}")
             except ValueError:
                 print("Error parsing start/end times from media_type")
@@ -699,7 +653,7 @@ class MediaDownloader:
             '-r', '30',
             '-vf', 'scale=-2:240',
             '-preset', 'veryfast',
-            os.path.join(get_data_dir(get_url(request)), 'low.mp4')
+            os.path.join(self.data_dir, 'low.mp4')
         ]
         FFMPEG(self.url, ffmpeg_command)
 
@@ -709,20 +663,12 @@ class MediaDownloader:
         print(f'downloading sub for {lang=}')
 
         try:
-            sub = {**(self.meta.get('subtitles') or {}), **(self.meta.get('automatic_captions') or {})}.get(lang) or ''
-            for i in sub:
-                if i.get('ext') == 'srt':
-                    sub_url = i.get('url')
-                    if sub_url:
-                        download_media_file(sub_url, os.path.join(self.data_dir, self.media_type), 'srt')
-                        break
-                if i.get('ext') == 'vtt':
-                    sub_url = i.get('url')
-                    if sub_url:
-                        download_media_file(sub_url, os.path.join(self.data_dir, self.media_type), 'vtt')
-                        break
-            else:
+            sub = {**(self.meta.get('subtitles') or {}), **(self.meta.get('automatic_captions') or {})}.get(lang) or []
+            selected = next((i for ext in ('srt', 'vtt') for i in sub if i.get('ext') == ext and i.get('url')), None)
+            if not selected:
                 raise FileNotFoundError('Selected subtitles not found')
+            download_media_file(selected['url'], os.path.join(self.data_dir, self.media_type), selected['ext'])
+
             file = check_media(url=self.url, media_type=self.media_type)
             if not file:
                 raise FileNotFoundError('Selected subtitles not found')
@@ -735,7 +681,10 @@ class MediaDownloader:
             if f := check_media(url=self.url, media_type=self.media_type):
                 os.remove(f)
             self.ydl_opts.update({'writesubtitles': True, 'skip_download': True, 'subtitleslangs': [lang]})
-            YTDLP.download(self.url, self.ydl_opts)
+            try:
+                YTDLP.download(self.url, self.ydl_opts, self.media_type)
+            except Exception as e:
+                pprint_exc(e)
 
         file = check_media(url=self.url, media_type=self.media_type)
         if file and file.endswith('srt'):
@@ -747,10 +696,14 @@ class MediaDownloader:
 
 
     def sprite(self):
-        if self.meta.get('is_live'): raise NotImplementedError('Livestream transcoding is not supported')
+        err = None
+        if self.meta.get('is_live'): err = 'Sprite not available for livestreams'
+        if self.meta["duration"] > generate_sprite_below: err = f"Video too long to generate sprite ({self.meta['duration']}s)"
+        if not self.meta.get('height') and not self.meta.get('width'): err = 'Sprite not available for non-video media'
+        if err:
+            print(err)
+            return
         if get_sprite(self.url, self.meta): return
-        if self.meta["duration"] > generate_sprite_below: raise ValueError(f"Video too long to generate sprite! ({self.meta['duration']}s)")
-        if not self.meta.get('height') and not self.meta.get('width'): raise TypeError('Sprite not available on non-video media!')
         video_path = check_media(url=self.url, media_type='video')
         sprite_dir = os.path.join(self.data_dir, 'temp_sprite')
         os.makedirs(sprite_dir, exist_ok=True)
@@ -789,10 +742,45 @@ class MediaDownloader:
                         y = row * frame_height
                         sprite_image.paste(img, (x, y))
                 sprite_image.save(os.path.join(self.data_dir, 'sprite.jpg'))
+                compress_image(self.url, 'sprite')
                 shutil.rmtree(sprite_dir)
             except Exception as e:
                 print(f"Sprite error: {e}")
 
+
+    def picture(self):
+        video_src = check_res_at_least(self.url, self.res)
+        if not video_src:
+            s = choose_sources_for_res(get_video_sources(self.url, self.meta), get_good_quality(get_video_formats(self.url, self.meta)))[0]
+            print(s)
+            video_src = s[0]
+        try:
+            ffmpeg_command = [
+                '-i', video_src,
+                '-ss', f'{self.start_time}',
+                '-frames:v', '1',
+                os.path.join(self.data_dir, f'{self.media_type}.jpg')
+            ]
+
+            if not FFMPEG(self.url, ffmpeg_command).success: raise RuntimeError('FFMPEG failed to extract picture')
+        except Exception as e:
+            if video_src.startswith('http'):
+                ffmpeg_command = [
+                    '-i', MediaDownloader(self.url, 'video').run(),
+                    '-ss', f'{self.start_time}',
+                    '-frames:v', '1',
+                    os.path.join(self.data_dir, f'{self.media_type}.jpg')
+                ]
+                if not FFMPEG(self.url, ffmpeg_command).success: raise RuntimeError('FFMPEG failed to extract picture')
+            else:
+                raise e
+
+
+
+def add_to_path(file):
+    d = file and os.path.dirname(file)
+    if d and d not in os.environ.get('PATH', '').split(os.pathsep):
+        os.environ['PATH'] = os.pathsep.join(filter(None, [os.environ.get('PATH'), d]))
 
 
 def check_alerts():
@@ -804,6 +792,24 @@ def check_alerts():
     if alerts:
         alerts.append('You can disable alerts by setting "SUPRESS_WARNINGS" environment variable to true.')
     return alerts
+
+
+def fetch_safe(url: str, **kwargs) -> requests.Response:
+    """prevents requesting from local network"""
+    for _ in range(5):
+        hostname = urlparse(url).hostname
+        if urlparse(url).scheme not in ('http', 'https') or not hostname:
+            raise ValueError('Invalid URL')
+        for addrinfo in socket.getaddrinfo(hostname, None):
+            ip = ipaddress.ip_address(addrinfo[4][0])
+            if not (getattr(ip, 'ipv4_mapped', None) or ip).is_global:
+                raise ValueError(f'Refusing to fetch URL resolving to disallowed address: {hostname}')
+        response = requests.get(url, allow_redirects=False, **kwargs)
+        if not response.is_redirect:
+            return response
+        url = urljoin(url, response.headers['Location'])
+        response.close()
+    raise ValueError('Too many redirects')
 
 
 def download_media_file(url: str, path_without_ext: str, ext: str|None = None):
@@ -818,7 +824,7 @@ def download_media_file(url: str, path_without_ext: str, ext: str|None = None):
             headers['Referer'] = f'{p.scheme}://{p.netloc}/'
     except Exception:
         pass
-    response = requests.get(url, stream=True, proxies=proxies, headers=headers, timeout=(5, 30))
+    response = fetch_safe(url, stream=True, proxies=get_proxy(url, True), headers=headers, timeout=(5, 30))
     response.raise_for_status()
     if not ext:
         urlpath = url
@@ -837,31 +843,35 @@ def load_http_cookies(cookies_str):
     return requests.utils.cookiejar_from_dict({k: v.value for k, v in c.items()})
 
 
-def stream_media_file(url: str, headers: str|None = None, cookies: str|None = None):
+def stream_media_file(url: str, src: str, headers: str|None = None, cookies: str|None = None):
     """Stream raw file with requests.get"""
     try:
         headers_dict = json.loads(headers) if headers else {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-        if client_range := request.headers.get('Range'):
+        url = url or ""
+        # Forward the client's Range so /direct (and anything else that
+        # streams through here) can seek. Guarded: get_meta() revalidates
+        # from worker threads with no request context.
+        if has_request_context() and (client_range := request.headers.get('Range')) and 'Range' not in headers_dict:
             headers_dict['Range'] = client_range
-        response = requests.get(url, stream=True, headers=headers_dict, cookies=load_http_cookies(cookies), proxies=proxies, timeout=(5, 30))
+        response = fetch_safe(src, stream=True, headers=headers_dict, cookies=load_http_cookies(cookies), proxies=get_proxy(url, True), timeout=(5, 30))
         response.raise_for_status()
         mime_type = response.headers.get('Content-Type', 'application/octet-stream')
 
-        url_path = urlparse(url).path.lower()
+        url_path = urlparse(src).path.lower()
         is_hls = 'mpegurl' in mime_type.lower() or url_path.endswith('.m3u8') or url_path.endswith('.m3u')
         if is_hls and 'mpegurl' not in mime_type.lower():
-            print(f'HLS detected by URL suffix despite Content-Type: {mime_type}  (url={url[:120]}...)')
+            print(f'HLS detected by URL suffix despite Content-Type: {mime_type}  (src={src[:120]}...)')
 
         if is_hls:
             lines = []
-            url_regex = re.compile(r'(URI=["\'])([^"\']*)(["\'])')
+            src_regex = re.compile(r'(URI=["\'])([^"\']*)(["\'])')
 
-            def replace_url(match):
-                prefix, orig_url, suffix = match.groups()
-                new_url = f'/external?url={quote_plus(urljoin(url, orig_url))}&headers={quote_plus(headers or "")}&cookies={quote_plus(cookies or "")}'
-                return f'{prefix}{new_url}{suffix}'
+            def replace_src(match):
+                prefix, orig_src, suffix = match.groups()
+                new_src = f'/external?src={quote_plus(urljoin(src, orig_src))}&headers={quote_plus(headers or "")}&cookies={quote_plus(cookies or "")}&url={quote_plus(url)}'
+                return f'{prefix}{new_src}{suffix}'
             raw_lines = response.content.decode('utf-8', errors='ignore').splitlines()
             skipline = False
             for idx, line in enumerate(raw_lines):
@@ -878,12 +888,14 @@ def stream_media_file(url: str, headers: str|None = None, cookies: str|None = No
                     continue
 
                 if line_str.startswith('#'):
-                    lines.append(url_regex.sub(replace_url, line))
+                    lines.append(src_regex.sub(replace_src, line))
                 else:
-                    line = f'/external?url={quote_plus(urljoin(url, line_str))}&headers={quote_plus(headers or "")}&cookies={quote_plus(cookies or "")}'
+                    urlbase = src if '://' in src else url
+                    line = f'/external?src={quote_plus(urljoin(urlbase, line_str))}&headers={quote_plus(headers or "")}&cookies={quote_plus(cookies or "")}&url={quote_plus(url)}'
                     lines.append(line)
 
-            resp = Response('\n'.join(lines), status=response.status_code, mimetype='application/vnd.apple.mpegurl')
+            resp = Response('\n'.join(lines), status=response.status_code, mimetype=mime_type)
+            resp.headers['Content-Security-Policy'] = 'sandbox'
             return resp
 
         def generate():
@@ -894,6 +906,7 @@ def stream_media_file(url: str, headers: str|None = None, cookies: str|None = No
                 yield chunk
 
         resp = Response(generate(), status=response.status_code, mimetype=mime_type)
+        resp.headers['Content-Security-Policy'] = 'sandbox'
 
         if 'Content-Length' in response.headers:
             resp.headers['Content-Length'] = response.headers['Content-Length']
@@ -903,8 +916,9 @@ def stream_media_file(url: str, headers: str|None = None, cookies: str|None = No
             resp.headers['Content-Range'] = response.headers['Content-Range']
         resp.headers['Accept-Ranges'] = 'bytes'
         return resp
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         print(f"Error streaming media file: {e}")
+        if url and os.path.exists(os.path.join(get_data_dir(url), 'meta')): get_meta(url, 10)
         return jsonify({"error": f"Failed to stream media: {e}"}), 500
 
 
@@ -930,14 +944,16 @@ def mark_watched_async(url):
 
 def host_file(url: str, media_type='video', download_name: str | None = None):
     if not url: return jsonify({"error": "URL parameter is required"}), 400
+    if '/' in media_type or '\\' in media_type: return jsonify({"error": "Invalid media type"}), 400
     file = MediaDownloader(url, media_type).run()
     if file:
         if media_type.startswith(_PLAYBACK_MEDIA_TYPES):
             mark_watched_async(url)
         if download_name:
-            if '-' in media_type: download_name += '-' + media_type.split('-', 1)[-1]
+            if '-' in media_type or '_' in media_type: download_name += '-' + media_type.replace('_', '-').split('-', 1)[-1]
             download_name += os.path.splitext(file)[1]
-        return send_file_partial(file, download_name=download_name)
+            download_name = download_name.replace('-0.0.', '-.').replace('_0.0-', '_-')
+        return send_file(file, download_name=download_name)
     return jsonify({"error": f"Cannot gather {media_type}"}), 404
 
 
@@ -948,6 +964,7 @@ def preload(url = None, meta = None, playlist = None):
 
     if meta:
         if meta.get('entries'): meta = meta['entries'][0]
+        meta.setdefault('timestamp', int(time.time()))
         try:
             os.makedirs(get_data_dir(url), exist_ok=True)
             with open(os.path.join(get_data_dir(url), 'meta.json'), 'w') as f:
@@ -979,6 +996,9 @@ def mark_watched(url):
 
 
 def get_media_duration(url, meta, media):
+    # get_meta() calls this with meta=None while it is still filling the dict in.
+    meta = meta or {}
+    if meta.get('is_live') or meta.get('live_status') == 'is_live': return 0
     try:
         if d := meta.get("duration"): return d
     except:
@@ -993,7 +1013,29 @@ def get_media_duration(url, meta, media):
             duration = line.split('Duration:')[-1].split(', start:')[0].strip()
             h, m, s = duration.split(":")
             return int(h)*3600 + int(m)*60 + float(s)
-    raise RuntimeError('Media duration impossible to gather - report this bug')
+    return 0
+
+
+def get_media_res(url, meta, media):
+    try:
+        if meta.get("width") and meta.get("height"): return int(meta.get("width")), int(meta.get("height"))
+    except: pass
+    ffmpeg_command = ['-i', media, '-hide_banner', '-f', 'null', '-stats']
+    ff = FFMPEG(url)
+    try: ff.run(ffmpeg_command)
+    except Exception: pass
+    info = ff.stdout
+    for line in info.splitlines():
+        if line.strip().startswith('Stream'):
+            for r in line.strip().split(' '):
+                try:
+                    w, h = r.split('x')
+                    w = int(w.strip(','))
+                    h = int(h.strip(','))
+                    if w > 0 and h > 0: return w, h
+                except:
+                    pass
+    raise RuntimeError('Media resolution impossible to gather - report this bug')
 
 
 def is_video_file(path):
@@ -1060,28 +1102,6 @@ def extract_middle_frame(url, video_path, out_path, meta=None):
     return False
 
 
-def get_media_res(url, meta, media):
-    try:
-        if meta.get("width") and meta.get("height"): return int(meta.get("width")), int(meta.get("height"))
-    except: pass
-    ffmpeg_command = ['-i', media, '-hide_banner', '-f', 'null', '-stats']
-    ff = FFMPEG(url)
-    try: ff.run(ffmpeg_command)
-    except Exception: pass
-    info = ff.stdout
-    for line in info.splitlines():
-        if line.strip().startswith('Stream'):
-            for r in line.strip().split(' '):
-                try:
-                    w, h = r.split('x')
-                    w = int(w.strip(','))
-                    h = int(h.strip(','))
-                    if w > 0 and h > 0: return w, h
-                except:
-                    pass
-    raise RuntimeError('Media resolution impossible to gather - report this bug')
-
-
 def pprint_exc(e, code = None):
     error = (re.sub(r'[^\x20-\x7e]',r'', re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", str(e))))
     traceback.print_exception(e)
@@ -1098,7 +1118,7 @@ def pprint_exc(e, code = None):
 
 
 def gen_pathname(url: str):
-    return sha1(url.encode()).hexdigest()
+    return sha1(url.encode(), usedforsecurity=False).hexdigest()
 
 
 def get_data_dir(url):
@@ -1113,6 +1133,47 @@ def get_global_cookies_file(force = False):
     path = os.path.join(data_path, 'cookies.txt')
     if os.path.exists(path): return path
     return None
+
+
+def get_proxy(url, as_requests_dict = False, as_ffmpeg_dict = False):
+    if not proxies: return None
+    proxy = proxies[0]
+    if url:
+        proxy_path = os.path.join(get_data_dir(url), 'proxy')
+        if not os.path.exists(proxy_path):
+            proxy = proxies[0]
+        else:
+            with open(proxy_path, 'r') as f:
+                _, proxy = f.read().split('\n')
+    if proxy == 'local': proxy = None
+    if as_ffmpeg_dict: return {'http_proxy': proxy} if proxy else None
+    if as_requests_dict: return {'http': proxy, 'https': proxy} if proxy else None
+    return proxy
+
+
+def advance_proxy(url, force = False):
+    if not url or len(proxies) < 2: return
+    proxy_path = os.path.join(get_data_dir(url), 'proxy')
+    proxy = None
+    if os.path.exists(proxy_path) and not force:
+        with open(proxy_path, 'r') as f:
+            proxy_time, proxy = f.read().split('\n')
+            if time.time() - float(proxy_time) < 20:
+                print('Skipping advancing proxy before 20s has passed')
+                return
+
+    if proxy and proxy in proxies:
+        proxy_idx = proxies.index(proxy)
+    else:
+        proxy_idx = 0
+    proxy_idx += 1
+    if proxy_idx >= len(proxies): proxy_idx = 0
+    print(f'Proxy {proxy} failed. Advancing to the next possible proxy: {proxies[proxy_idx]}')
+    with open(proxy_path, 'w') as f:
+        f.write(f'{time.time()}\n{proxies[proxy_idx]}')
+    print('Proxy advanced. Recreating meta...')
+    try: os.remove(os.path.join(get_data_dir(url), 'meta.json'))
+    except: pass
 
 
 def keepalive(data_dir):
@@ -1154,15 +1215,41 @@ def check_media(url: str, media_type: str):
     return None
 
 
-def get_meta(url: str):
+def check_meta_validity(url: str, meta: dict):
+    try:
+        print(f'## Checking meta validity for {url}')
+        srcs = choose_sources_for_res(get_video_sources(url, meta), get_good_quality(get_video_formats(url, meta)))
+        src = srcs[0] or srcs[1]
+        resp = stream_media_file(url, src[0], src[1], src[2])
+        if isinstance(resp, Response):
+            if resp.status_code > 399: raise ConnectionError(resp.response)
+
+            mime_type = resp.headers.get('Content-Type') or ''
+            if 'mpegurl' in mime_type.lower():
+
+                raw_lines = resp.data.decode('utf-8', errors='ignore').splitlines()
+                for line in raw_lines:
+                    line_str = line.strip()
+                    if not line_str or line_str.startswith('#'): continue
+                    resp = stream_media_file(None, urljoin(url, line_str), src[1], src[2])
+                    if not isinstance(resp, Response) or resp.status_code > 399: raise ConnectionError('Can not send a HLS request')
+                    break
+        else: raise ConnectionError('Can not send a request')
+        return True
+    except Exception as e:
+        pprint_exc(e)
+        return False
+
+
+def get_meta(url: str, max_meta_age = None):
     with FileCachingLock(url, 'meta') as cache:
         print(cache)
         if cache:
             try:
                 with open(cache, 'r') as f:
                     meta = json.load(f)
-                max_meta_age = 60 if meta.get('is_live') else 600
-                if time.time() - meta.get('timestamp') > max_meta_age:
+                max_meta_age = max(5, max_meta_age if max_meta_age is not None else (60 if meta.get('is_live') else 600))
+                if time.time() - (meta.get('timestamp') or 0) > max_meta_age:
                     # If the video (or audio) is already fully downloaded to
                     # local cache, skip CDN revalidation. We don't need a live
                     # source URL to serve bytes off disk, and re-writing
@@ -1173,24 +1260,10 @@ def get_meta(url: str):
                             check_media(url, 'video') or check_media(url, 'audio')):
                         return meta
                     print('Checking metadata validity...')
-                    srcs = choose_sources_for_res(get_video_sources(url, meta), get_good_quality(get_video_formats(url, meta)))
-                    src = srcs[0] or srcs[1]
-                    resp = stream_media_file(src[0], src[1], src[2])
-                    if isinstance(resp, Response):
-                        if resp.status_code > 399: raise ConnectionError(resp.response)
-
-                        mime_type = resp.headers.get('Content-Type') or ''
-                        if 'mpegurl' in mime_type.lower():
-
-                            raw_lines = resp.data.decode('utf-8', errors='ignore').splitlines()
-                            for line in raw_lines:
-                                line_str = line.strip()
-                                if not line_str or line_str.startswith('#'): continue
-                                resp = stream_media_file(urljoin(url, line_str), src[1], src[2])
-                                if not isinstance(resp, Response) or resp.status_code > 399: raise ConnectionError('Can not send a HLS request')
-                                break
-
-                    else: raise ConnectionError('Can not send a request')
+                    # ConnectionError (not RuntimeError) so the handler below keeps
+                    # serving the cached meta on a transient failure instead of
+                    # regenerating; see the comment there.
+                    if not check_meta_validity(url, meta): raise ConnectionError('Metadata invalid')
                     meta['timestamp'] = int(time.time())
                     with open(cache, 'w') as f:
                         json.dump(meta, f)
@@ -1218,30 +1291,42 @@ def get_meta(url: str):
                 try: os.remove(cache)
                 except OSError: pass
         print(f'downloading meta for {url}')
-        ydl_opts = {'skip_download': True}
-        ydl_opts.update(ydl_global_opts)
-        if cookies := check_media(url, 'cookies') or get_global_cookies_file(): ydl_opts["cookiefile"] = cookies
-        info = YTDLP.get_info(url, ydl_opts)
-        if info.get('entries'): info = info['entries'][0]
-
-        if not info.get('duration') or not info.get('width') or not info.get('height'):
+        possible_meta = None
+        last_exception = None
+        for i in range(len(proxies) * 2 + 1):
             try:
-                print('Fetching additional info for meta')
-                srcs = choose_sources_for_res(get_video_sources(url, info), get_good_quality(get_video_formats(url, info)))
-                src = srcs[0] or srcs[1]
-                duration = get_media_duration(url, None, src[0])
-                w, h = get_media_res(url, None, src[0])
-                info['duration'] = duration
-                info['width'] = w
-                info['height'] = h
+                ydl_opts = {'skip_download': True}
+                if i < len(proxies): ydl_opts = {'skip_download': True, 'socket_timeout': 3, 'extractor_retries': 0}
+                ydl_opts.update(ydl_global_opts)
+                if cookies := check_media(url, 'cookies') or get_global_cookies_file(): ydl_opts["cookiefile"] = cookies
+                info = YTDLP.get_info(url, ydl_opts)
+                if info.get('entries'): info = info['entries'][0]
+
+                if not info.get('duration') or not info.get('width') or not info.get('height'):
+                    try:
+                        print('Fetching additional info for meta')
+                        srcs = choose_sources_for_res(get_video_sources(url, info), get_good_quality(get_video_formats(url, info)))
+                        src = srcs[0] or srcs[1]
+                        duration = get_media_duration(url, None, src[0])
+                        info['duration'] = duration
+                        w, h = get_media_res(url, None, src[0])
+                        info['width'] = w
+                        info['height'] = h
+                    except Exception as e:
+                        pprint_exc(e)
+
+                info['original_url'] = url
+                info['timestamp'] = int(time.time())
+                possible_meta = info
+                with open(os.path.join(get_data_dir(url), 'meta.json'), 'w') as f:
+                    json.dump(info, f)
+                    return info
             except Exception as e:
                 pprint_exc(e)
-
-        info['original_url'] = url
-        info['timestamp'] = int(time.time())
-        with open(os.path.join(get_data_dir(url), 'meta.json'), 'w') as f:
-            json.dump(info, f)
-            return info
+                advance_proxy(url, True)
+                last_exception = e
+        if last_exception and not possible_meta: raise last_exception
+        return possible_meta
     return None
 
 
@@ -1324,12 +1409,12 @@ def get_subtitles(meta: dict):
     return all_subtitles
 
 
-def generate_hls(audio_source, video_source):
+def generate_hls(url, audio_source, video_source):
 
-    get_url = lambda s: f'/external?url={quote_plus(s[0])}&headers={quote_plus(s[1])}&cookies={quote_plus(s[2])}'
+    get_src_url = lambda s: f'/external?src={quote_plus(s[0])}&headers={quote_plus(s[1])}&cookies={quote_plus(s[2])}&url={quote_plus(url)}'
 
-    audio_url = get_url(audio_source) if audio_source and audio_source != video_source else None
-    video_url = get_url(video_source) if video_source else None
+    audio_url = get_src_url(audio_source) if audio_source and audio_source != video_source else None
+    video_url = get_src_url(video_source) if video_source else None
     audio_grp = ',AUDIO="audio_grp"'
 
     return '\n'.join([
@@ -1341,10 +1426,10 @@ def generate_hls(audio_source, video_source):
     ])
 
 
-def generate_dash(audio_source, video_source, duration):
+def generate_dash(url, audio_source, video_source, duration):
     def get_mp4_dash_ranges(source):
         headers_dict = json.loads(source[1]) | {"Range": "bytes=0-60000"}
-        response = requests.get(source[0], headers=headers_dict, cookies=load_http_cookies(source[2]), proxies=proxies, timeout=(5, 30))
+        response = fetch_safe(source[0], headers=headers_dict, cookies=load_http_cookies(source[2]), proxies=get_proxy(url, True), timeout=(5, 30))
         response.raise_for_status()
         data = response.content
         offset = 0
@@ -1370,7 +1455,7 @@ def generate_dash(audio_source, video_source, duration):
     mpd_src = lambda src, ranges, mediatype: '\n'.join([
        f'        <AdaptationSet mimeType="{mediatype}/mp4" codecs="{src[3]}" subsegmentAlignment="true" subsegmentStartsWithSAP="1">',
        f'          <Representation id="{mediatype}_track" bandwidth="1000000">',
-       f'            <BaseURL><![CDATA[/external?url={quote_plus(src[0])}&headers={quote_plus(src[1])}&cookies={quote_plus(src[2])}]]></BaseURL>',
+       f'            <BaseURL><![CDATA[/external?src={quote_plus(src[0])}&headers={quote_plus(src[1])}&cookies={quote_plus(src[2])}&url={quote_plus(url)}]]></BaseURL>',
        f'            <SegmentBase indexRange="{ranges[1]}" indexRangeExact="true">',
        f'              <Initialization range="{ranges[0]}" />',
         '            </SegmentBase>',
@@ -1397,6 +1482,7 @@ def choose_sources_for_res(sources: dict, res = None):
     Chooses (audio_source, video_source) among sources, needed for playback with specific resolution.
     """
     res = str(res) if res else ''
+    if res == '0': res = 'audio'
     video_source = None
     audio_source = None
     for s in sources.keys():
@@ -1412,8 +1498,18 @@ def choose_sources_for_res(sources: dict, res = None):
     return [], []
 
 
+def hls_available(url, *sources):
+    for s in sources:
+        if not s: continue
+        try:
+            if fetch_safe(s[0], headers=json.loads(s[1] or '{}'), proxies=get_proxy(url, True), timeout=5).status_code > 399: return False
+        except: return False
+    return True
+
+
 def get_direct(url = None, meta = None, res = None, simulate = False):
     try:
+        url = url or meta.get('original_url')
         sources = get_video_sources(url, meta, protocols=['http', 'https'])
         a, v = choose_sources_for_res(sources, res)
         if a and (not res or a == v):
@@ -1424,11 +1520,11 @@ def get_direct(url = None, meta = None, res = None, simulate = False):
 
         sources = get_video_sources(url, meta, protocols=['m3u8_native'])
         a, v = choose_sources_for_res(sources, res)
-        if a or v:
+        if (a or v) and hls_available(url, a, v):
             if not simulate:
                 print(f'Generating HLS direct for {res}')
                 try:
-                    content = generate_hls(a, v)
+                    content = generate_hls(url, a, v)
                     with open(os.path.join(get_data_dir(url), f'direct-{res or "audio"}.m3u8'), 'w') as f:
                         f.write(content)
                 except Exception as e:
@@ -1441,7 +1537,7 @@ def get_direct(url = None, meta = None, res = None, simulate = False):
             if not simulate:
                 print(f'Generating MPD direct for {res}')
                 try:
-                    content = generate_dash(a, v, get_media_duration(url, meta, a[0] if a else v[0]))
+                    content = generate_dash(url, a, v, get_media_duration(url, meta, a[0] if a else v[0]))
                     with open(os.path.join(get_data_dir(url), f'direct-{res or "audio"}.mpd'), 'w') as f:
                         f.write(content)
                 except Exception as e:
@@ -1492,7 +1588,7 @@ def get_sprite(url = None, meta = None, simulate = False):
             height = 0
 
             for i, img_url in enumerate(image_urls):
-                response = requests.get(img_url, proxies=proxies, timeout=(5, 30))
+                response = fetch_safe(img_url, proxies=get_proxy(url, True), timeout=(5, 30))
                 response.raise_for_status()
                 img = Image.open(io.BytesIO(response.content))
 
@@ -1508,6 +1604,7 @@ def get_sprite(url = None, meta = None, simulate = False):
                 current_y += img.height
 
             final_sprite.save(os.path.join(get_data_dir(url), 'sprite.jpg'))
+            compress_image(url, 'sprite')
 
         return [format['width'], format['height'], format['columns'], 1 / format['fps']]
     except Exception as e:
@@ -1539,6 +1636,16 @@ def pick_search_thumbnail(entry):
             u = t.get('url') if isinstance(t, dict) else None
             if _is_image(u): return u
     return None
+def compress_image(url: str, media_type: str) -> None:
+    path = check_media(url, media_type)
+    if not path or os.path.splitext(path)[1].lower() == ".webp":
+        return
+
+    output = os.path.splitext(path)[0] + ".webp"
+    ff = FFMPEG(url, ["-i", path, output])
+    if not ff.success: return
+    os.remove(path)
+    print(f'Compressed {media_type}')
 
 
 def search(query, search_engine='auto'):

@@ -277,6 +277,15 @@
                     <li><a href="javascript:void(0)" id="rebuild" title="Rescan ./data and rebuild the library index"><i class="fa-solid fa-rotate"></i> Rebuild library</a></li>
                     <li><a href="/logs"><i class="fa-solid fa-terminal"></i> Logs</a></li>
                     <li><a href="javascript:void(0)" onclick="copyExtensionScript(event)" id="script-copy"><i class="fa-solid fa-file-code"></i> Copy extension JS</a></li>
+                    <li><a href="/extension.user.js"><i class="fa-solid fa-puzzle-piece"></i> Install userscript</a></li>
+                    <li>
+                        <a href="https://github.com/Matszwe02/ytdlp_web_player" target="_blank">
+                            <span title="{{app_version}}"><i class="fa-solid fa-circle-info"></i> Version:<br><b>{{app_version}}</b><br></span>
+                            <span title="{{ydl_version}}">YT-DLP: <b>{{ydl_version}}</b><br></span>
+                            <span title="{{js_runtime_version[4:]}}">{{js_runtime_version[:4]}}: <b>{{js_runtime_version[4:]}}</b><br></span>
+                            <span title="{{ffmpeg_version}}">FFmpeg: <b>{{ffmpeg_version}}</b><br></span>
+                        </a>
+                    </li>
                 </ul>
             </div>
         </div>

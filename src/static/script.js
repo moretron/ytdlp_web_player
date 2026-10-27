@@ -14,7 +14,28 @@ let ongoingRequest = null;
 let keepaliveInterval = null;
 let audioContext = null;
 let audioSource = null;
+let logHistory = [];
 
+function log(text)
+{
+    console.log(text);
+    logHistory.push(`LOG  | ${text}`);
+    if (logHistory.length > 100) logHistory.splice(0, logHistory.length - 100);
+}
+
+function warn(text)
+{
+    console.warn(text);
+    logHistory.push(`WARN | ${text}`);
+    if (logHistory.length > 100) logHistory.splice(0, logHistory.length - 100);
+}
+
+function err(text)
+{
+    console.error(text);
+    logHistory.push(`ERR  | ${text}`);
+    if (logHistory.length > 100) logHistory.splice(0, logHistory.length - 100);
+}
 
 
 class PlayerState
@@ -32,7 +53,7 @@ class PlayerState
     {
         if (this.ongoing && player.currentTime() == 0)
         {
-            console.warn('Preventing saving unknown player state');
+            warn('Preventing saving unknown player state');
             return false;
         }
         this.ongoing = false;
@@ -92,7 +113,7 @@ function setUpAudioContext()
 {
     if (audioContext == null)
     {
-        console.log(`Setting up AudioContext`);
+        log(`Setting up AudioContext`);
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
         audioSource = audioContext.createMediaElementSource(player.el_.querySelector('video'));
         audioSource.connect(audioContext.destination);
@@ -109,14 +130,14 @@ function tryStopPropagation(event)
         event.stopPropagation();
     }
     catch (error) {}
-    player.el_.focus();
+    player.el_.focus({ preventScroll: true });
 }
 
 
 function addFetch()
 {
     activeFetches += 1;
-    console.log(activeFetches);
+    log(activeFetches);
     try
     {
         const settingsIcon = player?.controlBar?.SettingsButton?.el().querySelector('.fa-gear');
@@ -127,7 +148,7 @@ function addFetch()
     }
     catch (error)
     {
-        console.log(error);
+        log(error);
     }
 }
 
@@ -135,7 +156,7 @@ function addFetch()
 function removeFetch()
 {
     activeFetches -= 1;
-    console.log(activeFetches);
+    log(activeFetches);
     try
     {
         const settingsIcon = player?.controlBar?.SettingsButton?.el().querySelector('.fa-gear');
@@ -149,7 +170,7 @@ function removeFetch()
     }
     catch (error)
     {
-        console.log(error);
+        log(error);
     }
 }
 
@@ -172,14 +193,14 @@ async function retryFetch(url, options = {}, retries = 5, delay = 5000, visible 
     {
         if (error.name === 'AbortError')
         {
-            console.log(`Fetch for "${url}" aborted.`);
+            log(`Fetch for "${url}" aborted.`);
             throw error;
         }
         if (error.message.startsWith('Server error:'))
         {
             throw error;
         }
-        console.error(`Fetch failed, retrying in ${delay / 1000} seconds...`, error);
+        err(`Fetch failed, retrying in ${delay / 1000} seconds... ${error}`);
         if (retries > 0)
         {
             await new Promise(resolve => setTimeout(resolve, delay));
@@ -187,7 +208,7 @@ async function retryFetch(url, options = {}, retries = 5, delay = 5000, visible 
         }
         else
         {
-            console.error(`Max retries reached for "${url}". Fetch failed.`);
+            err(`Max retries reached for "${url}". Fetch failed.`);
             throw error;
         }
     }
@@ -203,6 +224,9 @@ function getUrlInfo()
     const urlParams = new URLSearchParams(window.location.search);
     const originalUrl = urlParams.get('v') || urlParams.get('url');
     const encodedUrl = encodeURIComponent(originalUrl);
+    let startTime = null;
+    try {startTime = parseFloat(urlParams.get('t')) || parseFloat((new URL(info.url)).searchParams.get('t').replaceAll('s', ''))}
+    catch {}
     var quality = urlParams.get('quality');
     if (quality == '') quality = null;
     if (quality == 'null') quality = null;
@@ -211,7 +235,7 @@ function getUrlInfo()
         if (quality == null) quality = `${info.default_quality}`;;
         if (info['height'] == null && info['width'] == null) quality = 'audio';
     }
-    return { quality: quality, originalUrl: originalUrl, encodedUrl:encodedUrl, urlParams:urlParams };
+    return { quality: quality, originalUrl: originalUrl, encodedUrl:encodedUrl, urlParams:urlParams, startTime: startTime };
 }
 
 
@@ -238,6 +262,18 @@ function formatTimeShort(timeInSeconds)
 }
 
 
+function updatePlaybackTime(newTime = null)
+{
+    const url = new URL(window.location.href);
+    if (newTime === null) newTime = player.currentTime();
+    if (newTime > 2 && newTime < info.duration - 2)
+    {
+        url.searchParams.set('t', Math.floor(newTime));
+        window.history.replaceState({}, '', url);
+    }
+}
+
+
 var prevRotation = 0;
 function fullscreenOnRotate()
 {
@@ -253,14 +289,14 @@ function fullscreenOnRotate()
         player.exitFullscreen();
     }
 }
-screen.orientation.addEventListener("change", (event) => {
+screen.orientation?.addEventListener("change", (event) => {
     fullscreenOnRotate();
 });
 
 
 function displayPlayerError(message)
 {
-    console.error(message);
+    err(message);
     if (!player) return;
     const errorDisplay = player.el_.querySelector('.vjs-error-display');
     errorDisplay.innerHTML = message;
@@ -283,7 +319,6 @@ window.addEventListener('pagehide', () => {
 
 function loadChapters()
 {
-    var duration = player.duration();
     var progressEl = player.controlBar.progressControl.children_[0].el_;
     var timeToolip = progressEl.querySelector('.vjs-time-tooltip');
     var chapterHoverTooltip = document.createElement('div');
@@ -309,7 +344,7 @@ function loadChapters()
     function updateChapterVisibility(currentTime)
     {
         const progressControlWidth = progressEl.clientWidth;
-        const scale = duration / progressControlWidth;
+        const scale = info.duration / progressControlWidth;
         const margin = 4; // px
         let chapterFound = false;
         for (let i = 0; i < info.chapters.length; i++)
@@ -336,7 +371,7 @@ function loadChapters()
         const rect = progressEl.getBoundingClientRect();
         const mouseX = (event.touches && event.touches[0] ? event.touches[0].clientX : event.clientX) - rect.left;
 
-        updateChapterVisibility((mouseX / progressControlWidth) * duration);
+        updateChapterVisibility((mouseX / progressControlWidth) * info.duration);
     }
 
     function onProgressBarLeave()
@@ -360,7 +395,7 @@ function loadChapters()
     {
         var el = document.createElement('div');
         el.className = 'vjs-marker';
-        el.style.left = `${(info.chapters[i].time / duration * 100)}%`;
+        el.style.left = `${(info.chapters[i].time / info.duration * 100)}%`;
         let label = info.chapters[i].label;
         el.addEventListener('mouseover', ()=>{turnOnChapterLabel(label);});
         el.addEventListener('mouseout', turnOffChapterLabel);
@@ -372,7 +407,7 @@ function loadChapters()
 function getVideoSource()
 {
     var url = getUrlInfo();
-    console.log(`Video quality: ${url.quality}`);
+    log(`Video quality: ${url.quality}`);
 
     let downloadUrl = `/direct?url=${url.encodedUrl}&quality=${url.quality}`;
     let videoType = info.sources[url.quality];
@@ -383,7 +418,7 @@ function getVideoSource()
         videoType = 'application/x-mpegURL';
     }
 
-    console.log(`Video source: src=${downloadUrl} type=${videoType}`);
+    log(`Video source: src=${downloadUrl} type=${videoType}`);
     return [downloadUrl, videoType];
 }
 
@@ -501,7 +536,7 @@ function applyVideoQuality()
     if (ps.suspend) return;
     if (player.src() == videoSource[0])
     {
-        console.log('Preventing switching to the same source');
+        log('Preventing switching to the same source');
         return;
     }
     player.src({ src: videoSource[0], type: videoSource[1] });
@@ -562,7 +597,7 @@ function setVideoQuality(height = null, button = null)
     var url = getUrlInfo();
     if (height === null) height = url.quality;
     if (height !== null) height = `${height}`;
-    console.log(`Setting video quality to ${height}`);
+    log(`Setting video quality to ${height}`);
     const buttons = menu.querySelectorAll('.vjs-resolution-option');
     url.urlParams.set('quality', height);
     if (button == null)
@@ -575,7 +610,7 @@ function setVideoQuality(height = null, button = null)
 
     if (usesHls)
     {
-        console.log('Fetching HLS...');
+        log('Fetching HLS...');
         // A per-switch token instead of setInterval: each /hls_segment probe
         // can block for 15+ seconds server-side, so a fixed 2 s interval
         // stacked up to ~8 concurrent probes against a transcoding server.
@@ -598,14 +633,14 @@ function setVideoQuality(height = null, button = null)
                         button?.classList?.add('vjs-menu-option-selected');
                         return;
                     }
-                    console.log('HLS not ready. Retrying fetching...');
+                    log('HLS not ready. Retrying fetching...');
                     await new Promise(r => setTimeout(r, 2000));
                 }
         });
     }
     else
     {
-        console.log('Fetching Direct...');
+        log('Fetching Direct...');
         retryFetch(getVideoSource()[0], {}, 2, undefined, undefined, true)
             .then(response => {
                 applyVideoQuality();
@@ -628,7 +663,7 @@ function setVideoQuality(height = null, button = null)
             })
             .catch(error => {
                 clearInterval(ongoingRequest);
-                console.error('Error fetching new quality:', error);
+                err(`Error fetching new quality: ${error}`);
                 if (info.disable_transcoding) return;
                 usesHls = true;
                 setVideoQuality(height);
@@ -662,19 +697,20 @@ class ZoomToFillToggle extends videojs.getComponent('Button')
     {
         const video = player.el_.querySelector('video');
         var newState = video.style.objectFit == 'contain';
+        var newState = !player.el_.classList.contains('fullscreen-cover');
         if (state === false || state === true)
         {
             newState = state;
         }
         if (newState === true)
         {
-            video.style.setProperty('object-fit', 'cover');
+            player.el_.classList.add('fullscreen-cover');
             this.el().innerHTML = '<span class="fa-solid fa-down-left-and-up-right-to-center"></span>';
             this.controlText('Restore Zoom');
         }
         else
         {
-            video.style.setProperty('object-fit', 'contain');
+            player.el_.classList.remove('fullscreen-cover');
             this.el().innerHTML = '<span class="fa-solid fa-up-right-and-down-left-from-center"></span>';
             this.controlText('Zoom to Fill');
         }
@@ -906,6 +942,7 @@ class DownloadButton extends videojs.getComponent('Button')
             { quality: 'best', title: 'Highest Quality' },
             { quality: 'current', title: 'Current Quality' },
             { quality: 'audio', title: 'Audio' },
+            { quality: 'picture', title: 'Picture' },
             { quality: 'trim', title: 'Trim' }
         ];
 
@@ -916,7 +953,23 @@ class DownloadButton extends videojs.getComponent('Button')
 
             const handleEvent = (event) => {
                 tryStopPropagation(event);
-                if (option.quality == 'trim') {
+                if (option.quality == 'picture')
+                {
+                    var url = getUrlInfo();
+                    const quality = url.quality || info.default_quality;
+                    const link = document.createElement('a');
+                    link.href = `/picture?url=${url.encodedUrl}&quality=${quality}&start=${player.currentTime()}`;
+                    link.download = 'file';
+
+                    this.handleCloseMenu(true);
+                    retryFetch(link.href, {}, 100, undefined, true, true).then(response => {
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+                    }).catch(error => { err(`Could not download picture: ${error.message || error}`); });
+                }
+                else if (option.quality == 'trim')
+                {
                     if (this.startBtn.style.display === 'block')
                     {
                         this.startBtn.style.display = 'none';
@@ -941,20 +994,17 @@ class DownloadButton extends videojs.getComponent('Button')
                     const link = document.createElement('a');
                     link.href = `/download?url=${url.encodedUrl}&quality=${quality}`;
 
-                    if (this.startTime != null && this.endTime != null)
-                        link.href += `&start=${this.startTime.toFixed(1)}&end=${this.endTime.toFixed(1)}`;
+                    if (this.startTime != null || this.endTime != null)
+                        link.href += `&start=${this.startTime ? this.startTime.toFixed(1) : ''}&end=${this.endTime ? this.endTime.toFixed(1) : ''}`;
 
                     link.download = 'file';
 
+                    this.handleCloseMenu(true);
                     retryFetch(link.href, {}, 100, undefined, true, true).then(response => {
                         document.body.appendChild(link);
                         link.click();
                         document.body.removeChild(link);
-                    })
-
-                    this.handleCloseMenu(true);
-                    retryFetch(link.href)
-                        .then(response => response.text())
+                    }).catch(error => { err(`Could not download video: ${error.message || error}`); });
                 }
             };
 
@@ -1674,7 +1724,7 @@ class PlaylistComponent extends Component
                 className: 'vjs-playlist-item'
             });
 
-            console.log(`Item URL: ${item.url}, self URL: ${this.currentVideoUrl}`);
+            log(`Item URL: ${item.url}, self URL: ${this.currentVideoUrl}`);
 
             if (item.url === this.currentVideoUrl)
             {
@@ -1831,6 +1881,8 @@ function addSponsorblock(data)
 
 function loadVideo()
 {
+    var debugView = document.getElementById('debug-view');
+    if (debugView) debugView.onclick = displayDebugInfo;
     var url = getUrlInfo();
     if (url.urlParams.toString().length < 10) return;
     
@@ -1956,24 +2008,29 @@ function loadVideo()
         {
             let timeDiff= player.bufferedEnd() - player.currentTime();
             let minLiveBuffer = parseFloat(info.min_live_buffer);
-            if (timeDiff > 30 || minLiveBuffer <= 0) return;
+            if (timeDiff > 30 || minLiveBuffer <= 0)
+            {
+                let rate = player.playbackRate();
+                if (rate != 1 && rate < 1.15 && rate > 0.9) player.playbackRate(1);
+                return;
+            }
             if (timeDiff < minBufferAheadTime) minBufferAheadTime = Math.max(timeDiff, 0);
             else minBufferAheadTime = (minBufferAheadTime * 2047 + timeDiff) / 2048;
             
             if (minBufferAheadTime < minLiveBuffer)
             {
                 player.playbackRate(0.95);
-                console.log('-');
+                log('-');
             }
             else if (minBufferAheadTime > minLiveBuffer * 3)
             {
                 player.playbackRate(1.1);
-                console.log('++');
+                log('++');
             }
             else if (minBufferAheadTime > minLiveBuffer * 2)
             {
                 player.playbackRate(1.05);
-                console.log('+');
+                log('+');
             }
             else
             {
@@ -2064,6 +2121,10 @@ function loadVideo()
             player.play();
         }
 
+        if (url.startTime && parseFloat(url.startTime) > 0)
+        {
+            player.currentTime(parseFloat(url.startTime));
+        }
     }
     retryFetch(`/info?url=${url.encodedUrl}`)
         .then(response => response.json())
@@ -2113,10 +2174,10 @@ function loadVideo()
                 {
                     if (info.disable_transcoding)
                     {
-                        console.warn(`EROROR ${error.code}`);
+                        warn(`EROROR ${error.code}`);
                         return;
                     }
-                    console.warn(`EROROR ${error.code} - Changing video source in order to resolve it`);
+                    warn(`EROROR ${error.code} - Changing video source in order to resolve it`);
                     usesHls = !usesHls;
                     setVideoQuality();
                 }
@@ -2147,9 +2208,12 @@ function loadVideo()
                 retryFetch(getVideoSource()[0], {}, 0, undefined, false, true).then(response => response?.ok).catch(() => {});
             }, 120000);
 
-            if (info.auto_bg_playback && navigator?.userAgentData?.mobile)
-            {
-                document.addEventListener('visibilitychange', () => {
+            setInterval(()=>{ updatePlaybackTime(); }, 10000);
+
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'hidden') updatePlaybackTime();
+                if (info.auto_bg_playback && navigator?.userAgentData?.mobile)
+                {
                     var url = getUrlInfo();
                     if (url.quality == 'audio')
                     {
@@ -2165,6 +2229,10 @@ function loadVideo()
                     if (document.visibilityState === 'hidden')
                     {
                         if (player.currentTime() + 10 > parseFloat(info.duration)) return;
+
+                        url.urlParams.set('t', player.currentTime().toFixed(1));
+                        history.replaceState(null, '', `${window.location.pathname}?${url.urlParams.toString()}`);
+
                         ps.save();
                         clearInterval(ongoingRequest);
                         if (!info.disable_transcoding)
@@ -2173,7 +2241,7 @@ function loadVideo()
                             player.src({ src: `/direct?url=${url.encodedUrl}&quality=audio`, type: info.sources['audio'] });
                         else
                         {
-                            console.log('No supported audio formats - cannot turn on bg playback');
+                            log('No supported audio formats - cannot turn on bg playback');
                             return;
                         }
                         ps.apply();
@@ -2184,8 +2252,8 @@ function loadVideo()
                         ps.suspend = false;
                         setVideoQuality();
                     }
-                });
-            }
+                }
+            });
 
         })
         .catch(error => {
@@ -2245,7 +2313,44 @@ function loadMediaSession()
     });
     navigator.mediaSession.setActionHandler("previoustrack", null);
     navigator.mediaSession.setActionHandler("nexttrack", null);
-    console.log("Loaded Media Player API");
+    log("Loaded Media Player API");
+}
+
+
+let debugInterval = null;
+function displayDebugInfo()
+{
+    let oldviewbox = document.getElementById('debug-viewbox');
+    if (oldviewbox)
+    {
+        document.body.removeChild(oldviewbox);
+        clearInterval(debugInterval);
+        return;
+    }
+    let viewbox = document.createElement("div");
+    viewbox.style = "width: 80%; height: 500px; overflow: scroll; position: absolute; top: 100vh; white-space: pre; background-color: #111; padding: 20pt;";
+    viewbox.id = 'debug-viewbox';
+
+    function updateDebugInfo()
+    {
+        const open = [...viewbox.querySelectorAll("details")].map(d => d.open);
+
+        viewbox.innerHTML = `
+            Debug logs for <b>${window.location.href}</b>
+            <details><summary>URL info</summary>${JSON.stringify(getUrlInfo(), null, 2)}</details>
+            <details><summary>Info dict</summary>${JSON.stringify(info, null, 2)}</details>
+            <details><summary>Current source</summary>${JSON.stringify(player.currentSources(), null, 2)}</details>
+            <details><summary>Console log</summary>${JSON.stringify(logHistory, null, 2)}</details>
+        `;
+
+        [...viewbox.querySelectorAll("details")].forEach((d, i) => d.open = open[i] ?? false);
+    }
+
+
+    debugInterval = setInterval(() => { updateDebugInfo(); }, 1000);
+    updateDebugInfo();
+
+    document.body.appendChild(viewbox);
 }
 
 

@@ -30,6 +30,7 @@ function isCacheable(request)
     if (request.method !== 'GET') return false;
     if (request.mode === 'navigate' || request.destination === 'document') return false;
     if (!['script', 'style', 'image', 'font'].includes(request.destination)) return false;
+    if (request.url.includes("user.js")) return false;
     const path = new URL(request.url).pathname;
     if (path.startsWith('/t/') || path.startsWith('/api/') || path.startsWith('/logs')) return false;
     return !request.url.includes("hls_stream");

@@ -1,7 +1,14 @@
+import importlib
+import importlib.metadata
+import io
+import json
 import os
 import shutil
 import subprocess
 import sys
+import threading
+import urllib.request
+import zipfile
 
 
 ffmpeg_version = '-'
@@ -11,13 +18,24 @@ app_version = '-'
 class External:
 
 
+    _reload_lock = threading.Lock()
+
+
     @staticmethod
     def yt_dlp():
-        import yt_dlp
-        try:
-            import yt_dlp.version
-        except:
-            print('Warning: ytdlp does not support version')
+        with External._reload_lock:
+            try:
+                importlib.invalidate_caches()
+                if getattr(sys.modules.get('yt_dlp.version'), '__version__', None) != importlib.metadata.version('yt-dlp'):
+                    for name in [m for m in list(sys.modules) if m == 'yt_dlp' or m.startswith('yt_dlp.')]:
+                        sys.modules.pop(name, None)
+            except Exception as e:
+                print(f'Warning: yt-dlp reload check failed: {e}')
+            import yt_dlp
+            try:
+                import yt_dlp.version
+            except:
+                print('Warning: yt-dlp does not support version')
         return yt_dlp
 
 
@@ -45,7 +63,7 @@ class External:
         try:
             p = os.path.dirname(__file__)
             for f in os.listdir(p):
-                if f.startswith('ffmpeg'): return os.path.abspath(os.path.join(p, f))
+                if f.startswith('ffmpeg') and not f.endswith('py'): return os.path.abspath(os.path.join(p, f))
             if f := shutil.which("ffmpeg"): return os.path.abspath(f)
             try:
                 import pyffmpeg # type: ignore
@@ -135,3 +153,43 @@ class External:
             return External.yt_dlp().version.__version__ or '-'
         except:
             return '-'
+
+
+    @staticmethod
+    def publish_with_cf(port: int, app_title: str):
+        try:
+            from pycloudflared import try_cloudflare # type: ignore
+        except Exception:
+            print('Installing "pycloudflared" to project\'s environment')
+            External._pip_install('pycloudflared')
+            from pycloudflared import try_cloudflare # type: ignore
+        cf_url = try_cloudflare(port=port)[0]
+        print('\n\n' + '#'*100 + '\n\n' + app_title +' is accessible on: ' + cf_url + '\n\n' + '#'*100 + '\n\n')
+
+
+    @staticmethod
+    def _install_ytdlp_raw(ytdlp_dir):
+
+        print('Installing yt-dlp from wheel...')
+
+        with urllib.request.urlopen("https://pypi.org/pypi/yt-dlp/json", timeout=10) as r:
+            data = json.load(r)
+        version = data["info"]["version"]
+        url = [f for f in data["releases"][version] if f["filename"].endswith(".whl")][0]["url"]
+
+        with urllib.request.urlopen(url, timeout=60) as r:
+            wheel = io.BytesIO(r.read())
+
+        shutil.rmtree(ytdlp_dir, ignore_errors=True)
+        with zipfile.ZipFile(wheel) as z:
+            z.extractall(ytdlp_dir)
+        print(f'Yt-dlp {version} installed!')
+
+
+    @staticmethod
+    def _load_frozen_ytdlp():
+        ytdlp_dir = str(os.path.abspath('./yt-dlp_update'))
+        External._install_ytdlp_raw(ytdlp_dir)
+
+        if str(ytdlp_dir) in sys.path: sys.path.remove(ytdlp_dir)
+        sys.path.insert(0, ytdlp_dir)

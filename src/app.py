@@ -8,9 +8,10 @@ import sys
 mimetypes.add_type('video/mp2t', '.ts')
 mimetypes.add_type('video/iso.segment', '.m4s')
 mimetypes.add_type('application/vnd.apple.mpegurl', '.m3u8')
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, send_file
 from io import BytesIO
 from starlette.middleware.wsgi import WSGIMiddleware
+from urllib.parse import quote_plus
 
 from main import *
 from addons import *
@@ -396,8 +397,8 @@ def iframe():
 
     if check_media(url, 'meta'):
         meta = get_meta(url)
-        video_width = meta.get('width', video_width)
-        video_height = meta.get('height', video_height)
+        video_width = meta.get('width') or video_width
+        video_height = meta.get('height') or video_height
     preload(url)
 
     print('Stopped serving iframe')
@@ -603,7 +604,7 @@ def serve_thumb_proxy():
         headers['Referer'] = referer
     try:
         r = _requests.get(raw, timeout=15, stream=True, allow_redirects=True,
-                          headers=headers, proxies=proxies)
+                          headers=headers, proxies=get_proxy(raw, True))
     except Exception as e:
         return _thumb_proxy_error(f'upstream fetch failed for {host}: '
                                   f'{type(e).__name__}: {e}', 502, raw, host=host,
@@ -691,6 +692,15 @@ def serve_sprite():
     return host_file(url, 'sprite')
 
 
+@app.route('/picture')
+def serve_picture():
+    start_time = request.args.get('start', 0, type=float)
+    media_type = f'picture_{start_time:.1f}-0.0'
+    url = get_url(request)
+    video_title = get_meta(url).get('title')
+    return host_file(url, media_type, download_name=video_title)
+
+
 @app.route('/sb')
 def get_sponsor_segments():
     url = get_url(request)
@@ -700,8 +710,7 @@ def get_sponsor_segments():
 
 @app.route('/raw')
 def raw():
-    html_template = f'<video controls autoplay><source src="/download?url={get_url(request)}" type="video/mp4"></video>'
-    return html_template
+    return f'<video controls autoplay><source src="/download?url={quote_plus(get_url(request))}" type="video/mp4"></video>'
 
 
 @app.route('/download')
@@ -757,7 +766,7 @@ def resp_direct():
         url = get_url(request)
         def stream_from_url_file(path):
             with open(path, 'r') as f:
-                return stream_media_file(f.readline().rstrip('\n'), f.readline().rstrip('\n'), f.readline().rstrip('\n'))
+                return stream_media_file(url, f.readline().rstrip('\n'), f.readline().rstrip('\n'), f.readline().rstrip('\n'))
 
         def resp_status(resp):
             if isinstance(resp, tuple): return resp[1]
@@ -825,24 +834,14 @@ def resp_direct():
 
 @app.route('/external')
 def serve_external():
-    from urllib.parse import urlparse
-    url = request.args.get('url')
-    if not url: return jsonify({"error": "URL parameter is required"}), 400
-    # This proxies arbitrary URLs with caller-supplied headers — restrict it
-    # to public http(s) targets so it can't be used to reach the LAN,
-    # loopback services, or cloud metadata endpoints.
-    parsed = urlparse(url)
-    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
-        return jsonify({"error": "only http(s) URLs are allowed"}), 400
-    try:
-        import ipaddress, socket
-        addr = socket.getaddrinfo(parsed.hostname, None)[0][4][0]
-        ip = ipaddress.ip_address(addr)
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-            return jsonify({"error": "host not allowed"}), 403
-    except (OSError, ValueError):
-        return jsonify({"error": "cannot resolve host"}), 400
-    return stream_media_file(url, request.args.get('headers'), request.args.get('cookies'))
+    src = request.args.get('src')
+    url = get_url(request)
+    headers = request.args.get('headers')
+    if client_range := request.headers.get('Range'):
+        headers_dict = json.loads(headers) if headers else {}
+        headers_dict['Range'] = client_range
+        headers= json.dumps(headers_dict)
+    return stream_media_file(url, src, headers, request.args.get('cookies'))
 
 
 @app.route('/subtitle')
@@ -1034,6 +1033,11 @@ def cache_status():
         return pprint_exc(e)
 
 
+@app.route('/extension.user.js')
+def serve_userscript():
+    return serve_extension()
+
+
 @app.route('/hls')
 def download_hls():
     try:
@@ -1077,7 +1081,7 @@ def hls_segment():
             resp.headers['Retry-After'] = '2'
             return resp
 
-    return send_file_partial(file)
+    return send_file(file)
 
 
 @app.route('/cookies', methods=['POST'])
@@ -1108,6 +1112,7 @@ def cancel_download():
 
 @app.after_request
 def after_request(response):
-    response.headers.add('Accept-Ranges', 'bytes')
-    response.headers.add('Content-Security-Policy', "frame-src *")
+    response.headers.setdefault('Accept-Ranges', 'bytes')
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('Content-Security-Policy', "frame-src *")
     return response

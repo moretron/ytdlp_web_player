@@ -39,11 +39,13 @@ auto_bg_playback = os.environ.get('AUTO_BG_PLAYBACK', 'True').lower() == 'true'
 audio_visualizer = os.environ.get('AUDIO_VISUALIZER', 'False').lower() == 'true'
 data_path = os.path.abspath(os.environ.get('DATA_PATH', './data'))
 save_all = os.environ.get('SAVE_ALL', 'True').lower() == 'true'
-proxy = os.environ.get('PROXY', '')
+proxies = [proxy for proxy in (os.environ.get('PROXIES') or 'local').split(',') if proxy != '']
+impersonate_browser = os.environ.get('IMPERSONATE_BROWSER', 'chrome')
 port = int(os.environ.get('PORT', '5000'))
+publish_with_cloudflare = (os.environ.get('PUBLISH_WITH_CLOUDFLARE', 'False')).lower() == 'true'
 linked_pid = int(os.environ.get('LINKED_PID', '0'))
 
-deprecated_env = ['DOWNLOAD_PATH']
+deprecated_env = ['DOWNLOAD_PATH', 'PROXY']
 
 hls_duration = 5
 hls_audio_duration = 10
@@ -51,19 +53,17 @@ hls_audio_duration = 10
 
 os.makedirs(data_path, exist_ok=True)
 print(f'Data path: {data_path}')
-ffmpeg = External.download_ffmpeg()
-if disable_transcoding:
-    ffmpeg = None
-elif not ffmpeg:
+ffmpeg = None if disable_transcoding else External.download_ffmpeg()
+if not ffmpeg and not disable_transcoding:
     raise RuntimeError("FFMPEG can not be detected nor installed in your system. Install FFMPEG or disable transcoding.")
 
 js_runtime = External.download_deno()
 
-ydl_global_opts = {'ffmpeg_location': ffmpeg, "noplaylist": True, 'playlistend': 0, "remote_components": ["ejs:github"], "concurrent_fragment_downloads": 2}
+ydl_global_opts = {'ffmpeg_location': ffmpeg, "noplaylist": True, 'playlistend': 0, "remote_components": ["ejs:github"], "concurrent_fragment_downloads": 2, "impersonate": impersonate_browser}
 if js_runtime and 'deno' not in subprocess.check_output([js_runtime, '--version']).decode(): ydl_global_opts["js_runtimes"] = {"node": {}}
+# if impersonate_browser: ydl_global_opts["impersonate"] = impersonate_browser
 
 app_version = External.get_app_version()
-proxies = {proxy.split('://')[0]: proxy} if proxy else None
 
 
 
@@ -154,10 +154,12 @@ if __name__ == '__main__':
 
     if linked_pid != 0: Thread(target=pid_watcher, daemon=True).start()
 
+    if publish_with_cloudflare:
+        External.publish_with_cf(port=port, app_title=app_title)
+
     import uvicorn
     if getattr(sys, 'frozen', False):
         from app import wsgi
         uvicorn.run(wsgi, host='0.0.0.0', port=port, workers=1, lifespan='off')
     else:
-        Thread(target=ytdlp_download, daemon=True).start()
         uvicorn.run("app:wsgi", host='0.0.0.0', port=port, workers=4, lifespan='off')
